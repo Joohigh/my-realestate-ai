@@ -48,18 +48,6 @@ with st.sidebar:
     district_options = ["전체 지역 (목록 전체)"] + sorted(list(district_code.keys()))
     selected_option = st.selectbox("수집할 지역(구)", district_options)
     
-    # [함수] 컬럼 이름 청소기 (에러 방지용)
-    def clean_columns(df):
-        # API마다 컬럼명이 조금씩 다를 수 있어 표준화
-        rename_map = {
-            '전용면적(㎡)': '전용면적',
-            '전용면적(m2)': '전용면적',
-            '거래금액(만원)': '거래금액',
-            '보증금액(만원)': '보증금액',
-            '월세금액(만원)': '월세금액'
-        }
-        return df.rename(columns=rename_map)
-
     if st.button("📥 실거래가(매매+전월세) 가져오기"):
         if selected_option == "전체 지역 (목록 전체)":
             target_districts = district_code
@@ -80,7 +68,7 @@ with st.sidebar:
             current_step = 0
             
             # ------------------------------------------------------------------
-            # 데이터 수집 루프 (안전장치 추가됨)
+            # 데이터 수집 루프 (강력한 청소 로직 적용)
             # ------------------------------------------------------------------
             for district_name, code in target_districts.items():
                 
@@ -92,9 +80,11 @@ with st.sidebar:
                         df_raw = api.get_data(property_type="아파트", trade_type="매매", sigungu_code=code, year_month=month)
                         
                         if df_raw is not None and not df_raw.empty:
-                            df_raw = clean_columns(df_raw) # 컬럼명 표준화
+                            # [핵심] 컬럼명 강제 표준화 (공백 제거 및 괄호 제거)
+                            # 예: "전용면적 (㎡) " -> "전용면적"
+                            df_raw.columns = df_raw.columns.str.strip().str.replace(r'\(.*\)', '', regex=True)
                             
-                            # [핵심] 필수 컬럼('전용면적')이 있는 경우에만 가져감 (없으면 버림)
+                            # 표준화 후 '전용면적'이 있는지 확인
                             if '전용면적' in df_raw.columns and '거래금액' in df_raw.columns:
                                 df_raw['구'] = district_name 
                                 df_sales_list.append(df_raw)
@@ -110,9 +100,9 @@ with st.sidebar:
                         df_raw_rent = api.get_data(property_type="아파트", trade_type="전월세", sigungu_code=code, year_month=month)
                         
                         if df_raw_rent is not None and not df_raw_rent.empty:
-                            df_raw_rent = clean_columns(df_raw_rent) # 컬럼명 표준화
+                            # 전월세 데이터도 똑같이 청소
+                            df_raw_rent.columns = df_raw_rent.columns.str.strip().str.replace(r'\(.*\)', '', regex=True)
                             
-                            # [핵심] 전용면적 없으면 계산 불가하므로 버림
                             if '전용면적' in df_raw_rent.columns:
                                 df_raw_rent['구'] = district_name
                                 df_rent_list.append(df_raw_rent)
@@ -126,6 +116,7 @@ with st.sidebar:
             # 데이터 병합 및 가공
             # ------------------------------------------------------------------
             if df_sales_list:
+                # 위에서 '전용면적'이 있는 것만 골라 담았으므로 여기서는 에러가 안 납니다.
                 df_sales_all = pd.concat(df_sales_list, ignore_index=True)
                 
                 # 전월세 매칭용 사전 만들기
@@ -134,13 +125,18 @@ with st.sidebar:
                     df_rent_all = pd.concat(df_rent_list, ignore_index=True)
                     for _, row in df_rent_all.iterrows():
                         try:
+                            # 이름이 조금씩 달라도 안전하게 가져오기
                             apt_name = row.get('단지명', row.get('단지', row.get('아파트', '')))
-                            area = float(row['전용면적']) # 여기서 에러 날 일 없음 (위에서 검사함)
+                            area = float(row['전용면적']) 
                             pyung = round(area / 3.3, 1)
                             key = (apt_name, pyung)
                             
-                            deposit = int(str(row['보증금액']).replace(',', '')) / 10000 
-                            monthly = int(str(row['월세금액']).replace(',', ''))
+                            # 금액 처리 (콤마 제거 등)
+                            deposit_raw = str(row.get('보증금액', row.get('보증금', '0'))).replace(',', '')
+                            monthly_raw = str(row.get('월세금액', row.get('월세', '0'))).replace(',', '')
+                            
+                            deposit = int(deposit_raw) / 10000 
+                            monthly = int(monthly_raw)
                             
                             if key not in rent_map: rent_map[key] = {'전세': [], '월세보증금': [], '월세액': []}
                             if monthly == 0: rent_map[key]['전세'].append(deposit)
@@ -148,7 +144,7 @@ with st.sidebar:
                                 rent_map[key]['월세보증금'].append(deposit)
                                 rent_map[key]['월세액'].append(monthly)
                         except:
-                            continue # 혹시라도 데이터 변환 실패하면 건너뜀
+                            continue # 데이터 1개가 이상해도 전체는 멈추지 않음
                 
                 # 결과 데이터프레임 생성
                 df_clean = pd.DataFrame()
@@ -166,7 +162,7 @@ with st.sidebar:
                 else:
                     df_clean['지역'] = df_sales_all['법정동']
 
-                # 수치 데이터 변환
+                # 수치 데이터 변환 (이제 여기서 에러 안 남)
                 df_clean['평형'] = df_sales_all['전용면적'].astype(float).apply(lambda x: round(x / 3.3, 1))
                 df_clean['매매가(억)'] = df_sales_all['거래금액'].astype(str).str.replace(',', '').astype(int) / 10000
                 
@@ -505,5 +501,6 @@ with tab2:
 
     except Exception as e:
         st.error(f"데이터 로드 중 오류: {e}")
+
 
 
