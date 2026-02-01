@@ -3,3 +3,6 @@ pandas
 streamlit-gsheets
 google-generativeai
 PublicDataReader
+openpyxl
+lxml
+requests
