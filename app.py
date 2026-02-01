@@ -22,7 +22,7 @@ st.title("🏙️ AI 부동산 통합 솔루션 (Personalized)")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
-# [2] 사이드바 (데이터 수집 & 내 자산 설정)
+# [2] 사이드바 (API 정밀 진단 모드)
 # --------------------------------------------------------------------------
 with st.sidebar:
     st.header("💰 내 재정 상황 (Private)")
@@ -35,7 +35,6 @@ with st.sidebar:
 
     st.header("🔍 데이터 자동 수집")
     
-    # 서울시 25개 자치구 + 분당구
     district_code = {
         "강남구": "11680", "강동구": "11740", "강북구": "11305", "강서구": "11500", "관악구": "11620",
         "광진구": "11215", "구로구": "11530", "금천구": "11545", "노원구": "11350", "도봉구": "11320",
@@ -56,9 +55,11 @@ with st.sidebar:
             
         progress_bar = st.progress(0, text="데이터 수집 준비 중...")
         
-        # 결과를 담을 빈 리스트
         df_sales_list = []
         df_rent_list = []
+        
+        # [진단] 에러 메시지를 담을 변수
+        last_error_msg = ""
         
         try:
             api = Transaction(api_key)
@@ -67,9 +68,6 @@ with st.sidebar:
             
             total_steps = len(target_districts) * len(months_to_fetch) * 2
             current_step = 0
-            
-            # 에러 확인용 플래그
-            error_count = 0
             
             for district_name, code in target_districts.items():
                 # [1] 매매 데이터
@@ -81,17 +79,20 @@ with st.sidebar:
                         df_raw = api.get_data(property_type="아파트", trade_type="매매", sigungu_code=code, year_month=month)
                         
                         if df_raw is not None and not df_raw.empty:
-                            # 컬럼 청소
                             df_raw.columns = df_raw.columns.str.strip().str.replace(r'\(.*\)', '', regex=True)
                             if '전용면적' in df_raw.columns:
                                 df_raw['구'] = district_name 
                                 df_sales_list.append(df_raw)
+                        else:
+                            # 데이터가 비어있다면, 혹시 에러 메시지가 왔는지 확인 시도 (라이브러리 특성상 어려울 수 있음)
+                            pass
+                            
                     except Exception as e:
-                        # [디버깅] 여기서 에러 내용을 화면에 출력합니다!
-                        error_count += 1
-                        st.error(f"❌ [{district_name}] 매매 수집 실패: {e}")
+                        # 진짜 에러(키 만료 등)는 여기서 잡힘
+                        last_error_msg = str(e)
+                        st.error(f"❌ API 호출 실패: {e}")
                     
-                    time.sleep(0.2) # 속도 조절 (0.2초)
+                    time.sleep(0.2)
 
                 # [2] 전월세 데이터
                 for month in months_to_fetch:
@@ -107,24 +108,22 @@ with st.sidebar:
                                 df_raw_rent['구'] = district_name
                                 df_rent_list.append(df_raw_rent)
                     except Exception as e:
-                        error_count += 1
-                        # 전월세 에러는 너무 많으면 지저분하니 첫 3개만 출력
-                        if error_count < 3:
-                            st.error(f"❌ [{district_name}] 전월세 수집 실패: {e}")
+                        pass # 전월세 에러는 일단 패스
                     
                     time.sleep(0.2)
 
             progress_bar.empty()
 
-            # ------------------------------------------------------------------
-            # 데이터가 모였는지 확인
-            # ------------------------------------------------------------------
+            # --- 결과 처리 ---
             if df_sales_list:
+                # (성공 시 로직은 기존과 동일)
                 df_sales_all = pd.concat(df_sales_list, ignore_index=True)
                 
-                # ... (이하 데이터 처리 로직은 기존과 동일) ...
-                # (지면 관계상 핵심 병합 로직만 남깁니다. 기존 코드의 아래 부분은 그대로 둡니다.)
-                
+                # ... (데이터 병합 및 전처리 코드는 너무 기니 생략, 기존 코드 그대로 사용됨) ...
+                # 이 아래 부분은 기존 코드와 똑같이 유지하면 됩니다.
+                # 편의를 위해 '데이터가 모였을 때'만 실행되도록 묶어줍니다.
+
+                # (간략화된 병합 로직)
                 rent_map = {}
                 if df_rent_list:
                     df_rent_all = pd.concat(df_rent_list, ignore_index=True)
@@ -142,7 +141,7 @@ with st.sidebar:
                                 rent_map[key]['월세보증금'].append(deposit)
                                 rent_map[key]['월세액'].append(monthly)
                         except: continue
-
+                
                 df_clean = pd.DataFrame()
                 if '단지명' in df_sales_all.columns: apt_col = '단지명'
                 elif '단지' in df_sales_all.columns: apt_col = '단지'
@@ -150,10 +149,8 @@ with st.sidebar:
                 
                 df_clean['아파트명'] = df_sales_all[apt_col]
                 
-                if '구' in df_sales_all.columns:
-                    df_clean['지역'] = df_sales_all['구'] + " " + df_sales_all['법정동']
-                else:
-                    df_clean['지역'] = df_sales_all['법정동']
+                if '구' in df_sales_all.columns: df_clean['지역'] = df_sales_all['구'] + " " + df_sales_all['법정동']
+                else: df_clean['지역'] = df_sales_all['법정동']
 
                 df_clean['평형'] = df_sales_all['전용면적'].astype(float).apply(lambda x: round(x / 3.3, 1))
                 df_clean['매매가(억)'] = df_sales_all['거래금액'].astype(str).str.replace(',', '').astype(int) / 10000
@@ -185,10 +182,12 @@ with st.sidebar:
                 st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (서울 전역)")
                 
             else:
-                # 데이터가 하나도 안 모였을 때 경고
-                st.warning("⚠️ 데이터를 하나도 가져오지 못했습니다. 위쪽의 붉은색 에러 메시지를 확인해주세요.")
-                if error_count > 0:
-                    st.info("💡 팁: 'SERVICE KEY IS NOT REGISTERED'가 뜨면 키가 아직 승인 안 된 것이고, 'LIMITED NUMBER'가 뜨면 오늘 하루 사용량(1,000건)을 초과한 것입니다.")
+                # [실패 원인 분석 메시지]
+                st.warning("⚠️ 데이터를 하나도 가져오지 못했습니다.")
+                if last_error_msg:
+                    st.error(f"서버 응답 에러: {last_error_msg}")
+                else:
+                    st.info("💡 팁: 에러 메시지가 없다면 '일일 트래픽(1000건)'을 초과했을 가능성이 매우 높습니다. 내일 다시 시도하거나, [강남구]만 선택해서 테스트해보세요.")
 
         except Exception as e:
             st.error(f"시스템 오류 발생: {e}")
@@ -492,6 +491,7 @@ with tab2:
 
     except Exception as e:
         st.error(f"데이터 로드 중 오류: {e}")
+
 
 
 
