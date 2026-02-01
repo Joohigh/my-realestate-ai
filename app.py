@@ -35,14 +35,17 @@ with st.sidebar:
 
     st.header("🔍 데이터 자동 수집")
     
+    # [수정] 서울시 25개 자치구 전체 + 분당구 코드 확장
     district_code = {
-        "강남구": "11680", "서초구": "11650", "송파구": "11710",
-        "마포구": "11440", "용산구": "11170", "성동구": "11200",
-        "노원구": "11350", "분당구": "41135", "강동구": "11740",
-        "양천구": "11470", "영등포구": "11560", "강서구": "11500"
+        "강남구": "11680", "강동구": "11740", "강북구": "11305", "강서구": "11500", "관악구": "11620",
+        "광진구": "11215", "구로구": "11530", "금천구": "11545", "노원구": "11350", "도봉구": "11320",
+        "동대문구": "11230", "동작구": "11590", "마포구": "11440", "서대문구": "11410", "서초구": "11650",
+        "성동구": "11200", "성북구": "11290", "송파구": "11710", "양천구": "11470", "영등포구": "11560",
+        "용산구": "11170", "은평구": "11380", "종로구": "11110", "중구": "11140", "중랑구": "11260",
+        "분당구(경기)": "41135" 
     }
     
-    district_options = ["전체 지역 (목록 전체)"] + list(district_code.keys())
+    district_options = ["전체 지역 (목록 전체)"] + sorted(list(district_code.keys()))
     selected_option = st.selectbox("수집할 지역(구)", district_options)
     
     if st.button("📥 실거래가(매매+전월세) 가져오기"):
@@ -56,6 +59,7 @@ with st.sidebar:
         try:
             api = Transaction(api_key)
             now = datetime.now()
+            # 이번 달과 지난 달 데이터 수집
             months_to_fetch = [now.strftime("%Y%m"), (now.replace(day=1) - timedelta(days=1)).strftime("%Y%m")]
             
             df_sales_list = []
@@ -63,31 +67,27 @@ with st.sidebar:
             total_steps = len(target_districts) * len(months_to_fetch) * 2
             current_step = 0
             
-            # ------------------------------------------------------------------
-            # [수정] 반복문 내부에서 '구' 이름 강제 주입
-            # ------------------------------------------------------------------
+            # 반복문 실행
             for district_name, code in target_districts.items():
-                # 매매 데이터
+                # 1. 매매 데이터
                 for month in months_to_fetch:
                     current_step += 1
                     progress_bar.progress(current_step / total_steps, text=f"[{district_name}] {month} 매매 데이터...")
                     try:
                         df_raw = api.get_data(property_type="아파트", trade_type="매매", sigungu_code=code, year_month=month)
                         if df_raw is not None and not df_raw.empty:
-                            # [핵심 수정] 여기에 '구' 정보를 추가합니다!
-                            df_raw['구'] = district_name 
+                            df_raw['구'] = district_name # 구 이름 강제 주입
                             df_sales_list.append(df_raw)
-                        time.sleep(0.05)
+                        time.sleep(0.05) # API 보호용 딜레이
                     except: pass
 
-                # 전월세 데이터
+                # 2. 전월세 데이터
                 for month in months_to_fetch:
                     current_step += 1
                     progress_bar.progress(current_step / total_steps, text=f"[{district_name}] {month} 전월세 데이터...")
                     try:
                         df_raw_rent = api.get_data(property_type="아파트", trade_type="전월세", sigungu_code=code, year_month=month)
                         if df_raw_rent is not None and not df_raw_rent.empty:
-                            # 전월세 데이터에도 '구' 정보 추가
                             df_raw_rent['구'] = district_name
                             df_rent_list.append(df_raw_rent)
                         time.sleep(0.05)
@@ -95,6 +95,7 @@ with st.sidebar:
 
             progress_bar.empty()
 
+            # 데이터 병합 및 처리 (기존 로직과 동일)
             if df_sales_list:
                 df_sales_all = pd.concat(df_sales_list, ignore_index=True)
                 
@@ -105,9 +106,9 @@ with st.sidebar:
                         apt_name = row.get('단지명', row.get('단지', row.get('아파트', '')))
                         area = float(row['전용면적'])
                         pyung = round(area / 3.3, 1)
-                        # 지역 구분이 섞이지 않게 구 이름도 키에 포함하면 좋지만, 
-                        # 여기서는 간단히 아파트명+평형으로 매칭 (이름이 같은 다른 구 아파트 주의 필요)
-                        key = (apt_name, pyung) 
+                        # 지역 구분을 위해 '구' 정보도 키에 포함하면 더 정확하지만, 
+                        # 여기서는 아파트명+평형으로 유지 (같은 이름 다른 구 아파트 주의)
+                        key = (apt_name, pyung)
                         
                         deposit = int(str(row['보증금액']).replace(',', '')) / 10000 
                         monthly = int(str(row['월세금액']).replace(',', ''))
@@ -125,8 +126,7 @@ with st.sidebar:
                 
                 df_clean['아파트명'] = df_sales_all[apt_col]
                 
-                # [핵심 수정] 구 이름 + 동 이름 합치기
-                # 이제 df_sales_all 안에 '구' 컬럼이 들어있으므로 합칠 수 있습니다.
+                # 구 이름 + 동 이름 합치기
                 if '구' in df_sales_all.columns:
                     df_clean['지역'] = df_sales_all['구'] + " " + df_sales_all['법정동']
                 else:
@@ -159,7 +159,7 @@ with st.sidebar:
                 df_clean = df_clean.sort_values(by='거래일', ascending=False)
                 
                 st.session_state['fetched_data'] = df_clean
-                st.success(f"✅ 총 {len(df_clean)}건 수집 완료!")
+                st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (서울 전역)")
             else:
                 st.warning("거래 내역이 없습니다.")
         except Exception as e:
@@ -464,3 +464,4 @@ with tab2:
 
     except Exception as e:
         st.error(f"데이터 로드 중 오류: {e}")
+
