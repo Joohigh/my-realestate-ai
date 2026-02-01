@@ -306,43 +306,109 @@ with tab2:
         df_sheet = conn.read(ttl=0)
         
         if not df_sheet.empty:
-            with st.expander("🥇 지역별 TOP 아파트 순위 보기 (클릭)", expanded=True):
-                df_rank = df_sheet.copy()
-                df_rank['하락률(%)'] = df_rank.apply(lambda x: ((x['전고점(억)'] - x['매매가(억)']) / x['전고점(억)'] * 100) if x['전고점(억)'] > 0 else 0, axis=1)
-                df_rank['갭(억)'] = df_rank['매매가(억)'] - df_rank['전세가(억)']
+            # 데이터 전처리 (계산)
+            df_rank = df_sheet.copy()
+            df_rank['하락률(%)'] = df_rank.apply(lambda x: ((x['전고점(억)'] - x['매매가(억)']) / x['전고점(억)'] * 100) if x['전고점(억)'] > 0 else 0, axis=1)
+            df_rank['갭(억)'] = df_rank['매매가(억)'] - df_rank['전세가(억)']
+
+            # -------------------------------------------------------------
+            # 1. [NEW] 맞춤형 필터링 (검색 조건 설정)
+            # -------------------------------------------------------------
+            with st.expander("🕵️‍♂️ 나에게 딱 맞는 아파트 찾기 (필터 설정)", expanded=True):
+                c1, c2, c3 = st.columns(3)
                 
-                regions = ["전체"] + sorted(df_rank['지역'].unique().tolist())
-                selected_region_rank = st.selectbox("어느 지역의 순위를 볼까요?", regions)
+                with c1:
+                    st.write("📐 **평형 선택**")
+                    # 평형 슬라이더 (10평 ~ 80평)
+                    pyung_range = st.slider("원하는 평수 범위", 10, 80, (20, 40), step=1)
+                    # 도시형 생활주택 등 소형 제외 옵션
+                    exclude_small = st.checkbox("도시형/소형 제외 (20평 미만 숨기기)", value=True)
                 
-                if selected_region_rank != "전체":
-                    df_rank = df_rank[df_rank['지역'] == selected_region_rank]
+                with c2:
+                    st.write("💰 **매매가 예산**")
+                    # 매매가 슬라이더 (0억 ~ 50억)
+                    price_max = st.slider("최대 매매가 (억 원)", 5, 50, 20)
                 
-                col_r1, col_r2 = st.columns(2)
+                with c3:
+                    st.write("💸 **투자/전세 조건**")
+                    # 갭투자 금액 또는 전세가 조건
+                    gap_max = st.slider("최대 갭 투자금 (매매-전세)", 1, 20, 10)
+            
+            # -------------------------------------------------------------
+            # 2. 필터 적용 로직
+            # -------------------------------------------------------------
+            # (1) 평형 필터
+            df_filtered = df_rank[
+                (df_rank['평형'] >= pyung_range[0]) & 
+                (df_rank['평형'] <= pyung_range[1])
+            ]
+            
+            # (2) 도시형/소형 제외 (20평 미만 필터링)
+            if exclude_small:
+                df_filtered = df_filtered[df_filtered['평형'] >= 20]
                 
-                with col_r1:
-                    st.subheader("🏡 실거주 추천 (저평가 순)")
-                    st.caption("전고점 대비 하락폭이 크고 입지점수가 높은 순")
-                    df_living = df_rank.sort_values(by=['하락률(%)', '입지점수'], ascending=[False, False]).head(10)
+            # (3) 가격 필터 (매매가)
+            df_filtered = df_filtered[df_filtered['매매가(억)'] <= price_max]
+            
+            # (4) 갭 필터 (투자 추천용) - *실거주 추천에는 적용 안 함
+            df_invest_filtered = df_filtered[df_filtered['갭(억)'] <= gap_max]
+
+            st.divider()
+
+            # -------------------------------------------------------------
+            # 3. 필터링된 결과 랭킹 보여주기
+            # -------------------------------------------------------------
+            # 지역 필터 (결과 내 재검색)
+            regions = ["전체"] + sorted(df_filtered['지역'].unique().tolist())
+            selected_region_rank = st.selectbox("지역별로 모아보기", regions)
+            
+            if selected_region_rank != "전체":
+                df_filtered = df_filtered[df_filtered['지역'] == selected_region_rank]
+                df_invest_filtered = df_invest_filtered[df_invest_filtered['지역'] == selected_region_rank]
+            
+            # 결과 출력
+            col_r1, col_r2 = st.columns(2)
+            
+            with col_r1:
+                st.subheader(f"🏡 실거주 추천 (총 {len(df_filtered)}개)")
+                st.caption(f"설정하신 평형({pyung_range[0]}~{pyung_range[1]}평)과 예산({price_max}억 이하) 내에서 저평가된 순서")
+                
+                if not df_filtered.empty:
+                    df_living = df_filtered.sort_values(by=['하락률(%)', '입지점수'], ascending=[False, False]).head(10)
                     st.dataframe(
                         df_living[['아파트명', '지역', '평형', '매매가(억)', '하락률(%)', '입지점수']]
                         .style.format({'매매가(억)': '{:.1f}', '하락률(%)': '{:.1f}%'})
                     )
-                    
-                with col_r2:
-                    st.subheader("💰 투자 추천 (소액 갭투자)")
-                    st.caption("매매가와 전세가 차이(갭)가 가장 적은 순")
-                    df_invest = df_rank[df_rank['전세가(억)'] > 0].sort_values(by=['갭(억)', '입지점수'], ascending=[True, False]).head(10)
+                else:
+                    st.info("조건에 맞는 매물이 없습니다. 필터를 조정해보세요.")
+                
+            with col_r2:
+                st.subheader(f"💰 갭투자 추천 (총 {len(df_invest_filtered)}개)")
+                st.caption(f"내 투자금 {gap_max}억으로 살 수 있는, 갭이 작은 순서")
+                
+                # 전세가 0인 오류 데이터 제외
+                df_invest_final = df_invest_filtered[df_invest_filtered['전세가(억)'] > 0]
+                
+                if not df_invest_final.empty:
+                    df_invest = df_invest_final.sort_values(by=['갭(억)', '입지점수'], ascending=[True, False]).head(10)
                     st.dataframe(
                         df_invest[['아파트명', '지역', '평형', '매매가(억)', '전세가(억)', '갭(억)']]
                         .style.format({'매매가(억)': '{:.1f}', '전세가(억)': '{:.1f}', '갭(억)': '{:.1f}'})
                     )
+                else:
+                    st.info("조건에 맞는 갭투자 매물이 없습니다.")
 
             st.divider()
 
+            # -------------------------------------------------------------
+            # 4. AI 심층 분석 (기존 유지)
+            # -------------------------------------------------------------
             st.subheader("🤖 나만의 AI 부동산 투자 자문")
             
+            # 검색 리스트도 필터링된 것 중에서 보여줄지, 전체에서 보여줄지 선택
+            # (사용성 위해 전체 리스트 유지하되, 필터 적용된 것 우선 표시 기능은 복잡하므로 전체 유지)
             apt_list = df_sheet['아파트명'].unique().tolist()
-            selected_apt = st.selectbox("분석할 단지를 검색하세요 (타자 입력 가능)", apt_list, index=None, placeholder="아파트명을 입력하세요...")
+            selected_apt = st.selectbox("분석할 단지를 검색하세요 (전체 단지 대상)", apt_list, index=None, placeholder="아파트명을 입력하세요...")
             
             if selected_apt:
                 target = df_sheet[df_sheet['아파트명'] == selected_apt].iloc[0]
