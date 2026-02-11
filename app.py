@@ -47,27 +47,30 @@ def fetch_trade_data(lawd_cd, deal_ymd, service_key):
         
         # XML 파싱
         if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            result_code = root.findtext(".//resultCode")
-            
-            # 성공 코드 확인 (00 또는 000)
-            if result_code in ["00", "000"]:
-                items = root.findall(".//item")
-                data_list = []
-                for item in items:
-                    # 필요한 정보만 쏙쏙 뽑기
-                    row = {
-                        "아파트": item.findtext("아파트"),
-                        "전용면적": item.findtext("전용면적"),
-                        "거래금액": item.findtext("거래금액"),
-                        "법정동": item.findtext("법정동"),
-                        "년": item.findtext("년"),
-                        "월": item.findtext("월"),
-                        "일": item.findtext("일"),
-                    }
-                    data_list.append(row)
-                return pd.DataFrame(data_list)
-            else:
+            try:
+                root = ET.fromstring(response.content)
+                result_code = root.findtext(".//resultCode")
+                
+                # 성공 코드 확인 (00 또는 000)
+                if result_code in ["00", "000"]:
+                    items = root.findall(".//item")
+                    data_list = []
+                    for item in items:
+                        # 필요한 정보만 쏙쏙 뽑기 (없으면 공백 처리)
+                        row = {
+                            "아파트": item.findtext("아파트") or "",
+                            "전용면적": item.findtext("전용면적") or "0",
+                            "거래금액": item.findtext("거래금액") or "0",
+                            "법정동": item.findtext("법정동") or "",
+                            "년": item.findtext("년") or "",
+                            "월": item.findtext("월") or "",
+                            "일": item.findtext("일") or "",
+                        }
+                        data_list.append(row)
+                    return pd.DataFrame(data_list)
+                else:
+                    return None
+            except ET.ParseError:
                 return None
         else:
             return None
@@ -144,15 +147,21 @@ with st.sidebar:
             # 지역명 합치기 (구 + 법정동)
             df_clean['지역'] = df_all['구'] + " " + df_all['법정동']
             
-            # 숫자 변환
-            df_clean['평형'] = df_all['전용면적'].astype(float).apply(lambda x: round(x / 3.3, 1))
-            df_clean['매매가(억)'] = df_all['거래금액'].astype(str).str.replace(',', '').astype(int) / 10000
+            # ------------------------------------------------------------------
+            # [수정된 부분] 안전한 숫자 변환 (에러 방지)
+            # ------------------------------------------------------------------
+            # 1. 전용면적: 문자를 숫자로 변환하되, 에러나면 0으로 처리(coerce)
+            df_clean['평형'] = pd.to_numeric(df_all['전용면적'], errors='coerce').fillna(0).apply(lambda x: round(x / 3.3, 1))
+            
+            # 2. 거래금액: 쉼표 제거 후 숫자로 변환, 에러나면 0으로 처리
+            # (공백 제거 .strip() 추가)
+            clean_price = df_all['거래금액'].astype(str).str.replace(',', '').str.strip()
+            df_clean['매매가(억)'] = pd.to_numeric(clean_price, errors='coerce').fillna(0).astype(int) / 10000
             
             # 날짜
             df_clean['거래일'] = df_all['년'] + "-" + df_all['월'].str.zfill(2) + "-" + df_all['일'].str.zfill(2)
             
             # 전세가/월세 정보는 매매 API에 없으므로, 매매가의 60%로 단순 추정 (API 트래픽 절약)
-            # (전월세 API까지 호출하면 하루 1000건 제한을 너무 빨리 넘겨버립니다)
             df_clean['전세가(억)'] = df_clean['매매가(억)'] * 0.6 
             df_clean['월세보증금(억)'] = 0
             df_clean['월세액(만원)'] = 0
