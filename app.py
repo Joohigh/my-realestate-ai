@@ -18,7 +18,6 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
     st.stop()
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-# 키 디코딩 (직접 요청 시 필수)
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 st.title("🏙️ AI 부동산 통합 솔루션 (Direct Mode)")
@@ -26,11 +25,11 @@ st.caption("서울+경기 핵심지 통합 분석 (최신 서버 직접 접속)"
 st.markdown("---")
 
 # --------------------------------------------------------------------------
-# [함수] 정부 서버 직접 접속 및 파싱 (라이브러리 미사용)
+# [함수] 정부 서버 직접 접속 및 파싱 (한글/영어 태그 모두 지원)
 # --------------------------------------------------------------------------
 def fetch_trade_data(lawd_cd, deal_ymd, service_key):
     """
-    공공데이터포털 아파트 매매 실거래 상세 자료 (최신 URL)
+    공공데이터포털 아파트 매매 실거래 상세 자료
     """
     url = "http://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
     
@@ -38,33 +37,42 @@ def fetch_trade_data(lawd_cd, deal_ymd, service_key):
         "serviceKey": service_key,
         "LAWD_CD": lawd_cd,
         "DEAL_YMD": deal_ymd,
-        "numOfRows": 1000, # 한 번에 많이 가져오기
+        "numOfRows": 1000,
         "pageNo": 1
     }
     
     try:
         response = requests.get(url, params=params, timeout=10)
         
-        # XML 파싱
         if response.status_code == 200:
             try:
                 root = ET.fromstring(response.content)
                 result_code = root.findtext(".//resultCode")
                 
-                # 성공 코드 확인 (00 또는 000)
                 if result_code in ["00", "000"]:
                     items = root.findall(".//item")
                     data_list = []
                     for item in items:
-                        # 필요한 정보만 쏙쏙 뽑기 (없으면 공백 처리)
+                        # [핵심 수정] 한글 태그와 영어 태그를 동시에 찾습니다.
+                        # (정부 API 버전에 따라 태그명이 다를 수 있음)
+                        
+                        apt_name = item.findtext("아파트") or item.findtext("aptNm") or ""
+                        area = item.findtext("전용면적") or item.findtext("excluUseAr") or "0"
+                        price = item.findtext("거래금액") or item.findtext("dealAmount") or "0"
+                        dong = item.findtext("법정동") or item.findtext("umdNm") or ""
+                        
+                        year = item.findtext("년") or item.findtext("dealYear") or ""
+                        month = item.findtext("월") or item.findtext("dealMonth") or ""
+                        day = item.findtext("일") or item.findtext("dealDay") or ""
+
                         row = {
-                            "아파트": item.findtext("아파트") or "",
-                            "전용면적": item.findtext("전용면적") or "0",
-                            "거래금액": item.findtext("거래금액") or "0",
-                            "법정동": item.findtext("법정동") or "",
-                            "년": item.findtext("년") or "",
-                            "월": item.findtext("월") or "",
-                            "일": item.findtext("일") or "",
+                            "아파트": apt_name,
+                            "전용면적": area,
+                            "거래금액": price,
+                            "법정동": dong,
+                            "년": year,
+                            "월": month,
+                            "일": day,
                         }
                         data_list.append(row)
                     return pd.DataFrame(data_list)
@@ -91,7 +99,6 @@ with st.sidebar:
 
     st.header("🔍 데이터 자동 수집")
     
-    # 서울 25개구 + 경기 핵심지
     district_code = {
         "서울 강남구": "11680", "서울 강동구": "11740", "서울 강북구": "11305", "서울 강서구": "11500", "서울 관악구": "11620",
         "서울 광진구": "11215", "서울 구로구": "11530", "서울 금천구": "11545", "서울 노원구": "11350", "서울 도봉구": "11320",
@@ -115,7 +122,6 @@ with st.sidebar:
         
         df_list = []
         now = datetime.now()
-        # 최근 2개월 조회
         months = [now.strftime("%Y%m"), (now.replace(day=1) - timedelta(days=1)).strftime("%Y%m")]
         
         total_steps = len(target_districts) * len(months)
@@ -126,52 +132,48 @@ with st.sidebar:
                 step += 1
                 progress_bar.progress(step / total_steps, text=f"[{name}] {ym} 데이터 수신 중...")
                 
-                # 직접 만든 함수 호출
                 df_raw = fetch_trade_data(code, ym, api_key_decoded)
                 
                 if df_raw is not None and not df_raw.empty:
                     df_raw['구'] = name
                     df_list.append(df_raw)
                 
-                time.sleep(0.1) # 서버 예의 지키기
+                time.sleep(0.1)
         
         progress_bar.empty()
         
         if df_list:
             df_all = pd.concat(df_list, ignore_index=True)
             
-            # 데이터 가공 (전처리)
+            # 전처리
             df_clean = pd.DataFrame()
             df_clean['아파트명'] = df_all['아파트']
-            
-            # 지역명 합치기 (구 + 법정동)
             df_clean['지역'] = df_all['구'] + " " + df_all['법정동']
             
-            # ------------------------------------------------------------------
-            # [수정된 부분] 안전한 숫자 변환 (에러 방지)
-            # ------------------------------------------------------------------
-            # 1. 전용면적: 문자를 숫자로 변환하되, 에러나면 0으로 처리(coerce)
+            # 숫자 변환 (안전 장치 포함)
             df_clean['평형'] = pd.to_numeric(df_all['전용면적'], errors='coerce').fillna(0).apply(lambda x: round(x / 3.3, 1))
             
-            # 2. 거래금액: 쉼표 제거 후 숫자로 변환, 에러나면 0으로 처리
-            # (공백 제거 .strip() 추가)
             clean_price = df_all['거래금액'].astype(str).str.replace(',', '').str.strip()
             df_clean['매매가(억)'] = pd.to_numeric(clean_price, errors='coerce').fillna(0).astype(int) / 10000
             
-            # 날짜
-            df_clean['거래일'] = df_all['년'] + "-" + df_all['월'].str.zfill(2) + "-" + df_all['일'].str.zfill(2)
+            df_clean['거래일'] = df_all['년'] + "-" + df_all['월'].astype(str).str.zfill(2) + "-" + df_all['일'].astype(str).str.zfill(2)
             
-            # 전세가/월세 정보는 매매 API에 없으므로, 매매가의 60%로 단순 추정 (API 트래픽 절약)
             df_clean['전세가(억)'] = df_clean['매매가(억)'] * 0.6 
             df_clean['월세보증금(억)'] = 0
             df_clean['월세액(만원)'] = 0
-            
             df_clean['전고점(억)'] = 0.0
             df_clean['입지점수'] = 0
             
             df_clean = df_clean.sort_values(by='거래일', ascending=False)
             st.session_state['fetched_data'] = df_clean
+            
+            # 성공 메시지
             st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (정상 작동)")
+            
+            # [디버깅] 만약 여전히 0이라면 첫 번째 데이터의 원본을 보여줌
+            if df_clean['매매가(억)'].sum() == 0:
+                st.warning("⚠️ 데이터는 가져왔으나 값이 0입니다. 태그 매칭 문제일 수 있습니다.")
+                st.write("원본 데이터 샘플:", df_all.head(1))
         else:
             st.warning("⚠️ 수집된 데이터가 없습니다. (오늘 트래픽 초과 가능성 있음)")
 
@@ -202,20 +204,17 @@ with tab1:
         if st.button("💾 구글 시트에 저장 (기준정보 반영)"):
             status_container = st.container()
             try:
-                # 1. 기준정보 로드
                 try:
                     df_master = conn.read(worksheet="기준정보", ttl=0)
                     master_dict = {}
                     if not df_master.empty:
                         for _, row in df_master.iterrows():
-                            # 공백 제거 매칭
                             raw_name = str(row['아파트명'])
                             clean_name = raw_name.replace(" ", "").strip()
                             master_dict[clean_name] = {'전고점': row.get('전고점(억)', 0), '점수': row.get('입지점수', 0)}
                 except:
                     master_dict = {}
 
-                # 2. 매칭
                 for idx, row in df_new.iterrows():
                     target_name = str(row['아파트명']).replace(" ", "").strip()
                     if target_name in master_dict:
@@ -223,7 +222,6 @@ with tab1:
                         df_new.at[idx, '전고점(억)'] = info['전고점']
                         df_new.at[idx, '입지점수'] = info['점수']
 
-                # 3. 저장
                 try:
                     df_current = conn.read(ttl=0)
                 except:
@@ -276,10 +274,8 @@ with tab2:
         if not df_sheet.empty:
             df_rank = df_sheet.copy()
             df_rank['하락률(%)'] = df_rank.apply(lambda x: ((x['전고점(억)'] - x['매매가(억)']) / x['전고점(억)'] * 100) if x['전고점(억)'] > 0 else 0, axis=1)
-            # 전세가는 추정치(60%)로 계산
             df_rank['갭(억)'] = df_rank['매매가(억)'] - df_rank['전세가(억)']
 
-            # [필터링 UI]
             with st.expander("🕵️‍♂️ 나에게 딱 맞는 아파트 찾기 (필터 설정)", expanded=True):
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -293,7 +289,6 @@ with tab2:
                     st.write("💸 **투자/전세 조건**")
                     gap_max = st.slider("최대 갭 투자금 (매매-전세)", 1, 20, 10)
             
-            # [필터 적용]
             df_filtered = df_rank[
                 (df_rank['평형'] >= pyung_range[0]) & 
                 (df_rank['평형'] <= pyung_range[1])
