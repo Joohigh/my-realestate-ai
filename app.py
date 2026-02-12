@@ -21,7 +21,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 st.title("🏙️ AI 부동산 통합 솔루션 (Complete Ver.)")
-st.caption("서울+경기 핵심지 통합 분석: [랭킹 추천] + [AI 채팅 자문]")
+st.caption("서울+경기 핵심지 통합 분석: [전체 랭킹 스크롤] + [AI 채팅 자문]")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -183,7 +183,7 @@ with tab2:
         
         if not df_sheet.empty:
             # =========================================================
-            # PART 1. 추천 랭킹 리스트 (복구됨!)
+            # PART 1. 추천 랭킹 리스트 (스크롤 적용)
             # =========================================================
             st.header("🏆 AI 추천 랭킹 (Ranking)")
             
@@ -219,20 +219,30 @@ with tab2:
                 df_filtered = df_filtered[df_filtered['지역'] == selected_region_rank]
                 df_invest_filtered = df_invest_filtered[df_invest_filtered['지역'] == selected_region_rank]
 
-            # 결과 출력 (2단 컬럼)
+            # 결과 출력 (2단 컬럼 + 스크롤 적용)
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 st.subheader(f"🏡 실거주 추천 ({len(df_filtered)}건)")
-                st.caption("저평가(하락률) + 입지점수 순")
+                st.caption("저평가(하락률) + 입지점수 순 (전체 보기)")
                 if not df_filtered.empty:
-                    st.dataframe(df_filtered.sort_values(by=['하락률(%)', '입지점수'], ascending=[False, False]).head(10)[['아파트명', '지역', '평형', '매매가(억)', '하락률(%)']].style.format({'매매가(억)': '{:.1f}', '하락률(%)': '{:.1f}%'}))
+                    # [수정] head(10) 제거 및 height=500 추가
+                    st.dataframe(
+                        df_filtered.sort_values(by=['하락률(%)', '입지점수'], ascending=[False, False])[['아파트명', '지역', '평형', '매매가(억)', '하락률(%)']].style.format({'매매가(억)': '{:.1f}', '하락률(%)': '{:.1f}%'}),
+                        height=500, 
+                        use_container_width=True
+                    )
                 else: st.info("조건에 맞는 매물이 없습니다.")
             
             with col_r2:
                 st.subheader(f"💰 갭투자 추천 ({len(df_invest_filtered)}건)")
-                st.caption("적은 투자금(갭) + 입지점수 순")
+                st.caption("적은 투자금(갭) + 입지점수 순 (전체 보기)")
                 if not df_invest_filtered.empty:
-                    st.dataframe(df_invest_filtered.sort_values(by=['갭(억)', '입지점수'], ascending=[True, False]).head(10)[['아파트명', '지역', '평형', '매매가(억)', '갭(억)']].style.format({'매매가(억)': '{:.1f}', '갭(억)': '{:.1f}'}))
+                    # [수정] head(10) 제거 및 height=500 추가
+                    st.dataframe(
+                        df_invest_filtered.sort_values(by=['갭(억)', '입지점수'], ascending=[True, False])[['아파트명', '지역', '평형', '매매가(억)', '갭(억)']].style.format({'매매가(억)': '{:.1f}', '갭(억)': '{:.1f}'}),
+                        height=500,
+                        use_container_width=True
+                    )
                 else: st.info("조건에 맞는 갭투자 매물이 없습니다.")
 
             st.divider()
@@ -244,7 +254,6 @@ with tab2:
             st.info("위 리스트에서 관심 있는 아파트를 발견하셨나요? 여기서 선택해서 AI와 상담해보세요.")
 
             # 1. 아파트 선택
-            # (필터링된 리스트에 있는 아파트를 우선적으로 보여줄 수도 있지만, 사용성을 위해 전체 리스트 사용)
             apt_list = sorted(df_sheet['아파트명'].unique().tolist())
             selected_apt = st.selectbox("상담할 아파트 선택", apt_list, index=None, placeholder="아파트명을 선택하세요...")
             
