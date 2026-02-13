@@ -18,8 +18,8 @@ if "GOOGLE_API_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Database Ver.)")
-st.caption("구글 시트(RealEstate_DB)에 저장된 네이버 호가 데이터를 기반으로 분석합니다.")
+st.title("🏙️ AI 부동산 통합 솔루션 (Seoul & Gyeonggi)")
+st.caption("서울 전역 + 경기 핵심지 네이버 호가 분석")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -44,13 +44,10 @@ def get_naver_real_estate_data(region_code, region_name):
         for item in complex_list:
             try:
                 name = item.get("nm", "")
-                total_households = item.get("hscpNo", 0) # API 구조상 세대수 정확치 않을 수 있음
                 min_price = item.get("minPrc", 0)
                 max_price = item.get("maxPrc", 0)
                 
-                # 전세 최저가 (네이버 모바일 API는 전세가를 별도 호출해야 정확하나, 트래픽 방지 위해 추정치 or 0 처리)
-                # 여기서는 안전하게 매매가 기준으로만 수집하고, 전세는 사용자 분석 시점에 AI가 추정하거나 60% 룰 적용
-                
+                # 억 단위 변환
                 sale_price_val = int(min_price) / 10000 if min_price else 0
                 
                 if sale_price_val > 0:
@@ -58,8 +55,8 @@ def get_naver_real_estate_data(region_code, region_name):
                         "아파트명": name,
                         "지역": region_name,
                         "매매가(억)": sale_price_val,
-                        "전세가(억)": sale_price_val * 0.6, # (임시) 전세가율 60% 일괄 적용
-                        "갭(억)": sale_price_val * 0.4,     # (임시) 갭 40%
+                        "전세가(억)": sale_price_val * 0.6, # 전세가율 60% 가정
+                        "갭(억)": sale_price_val * 0.4,     # 갭 40% 가정
                         "호가범위": f"{int(min_price/10000)}~{int(max_price/10000)}억",
                         "수집일": datetime.now().strftime("%Y-%m-%d")
                     }
@@ -84,7 +81,6 @@ with st.sidebar:
 # --------------------------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(["🏆 추천 랭킹", "🤖 AI 심층 분석 & 채팅", "⚙️ 데이터 관리(수집)"])
 
-# 구글 시트 연결
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except:
@@ -95,26 +91,27 @@ except:
 # TAB 1: 추천 랭킹 (DB 읽기 전용)
 # ==========================================================================
 with tab1:
-    st.header("🏆 AI 추천 랭킹 (Real-time Ranking)")
+    st.header("🏆 AI 추천 랭킹")
     
-    # 1. DB 로드
     try:
-        # TTL=0으로 설정하여 항상 최신 시트 데이터를 가져옴
         df_sheet = conn.read(ttl=0)
     except:
         df_sheet = pd.DataFrame()
     
     if not df_sheet.empty:
-        # 2. 필터 UI
+        # 필터 UI
         with st.expander("🕵️‍♂️ 조건 검색 (필터)", expanded=True):
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 price_max = st.slider("최대 매매가 (억)", 5, 50, 20)
             with c2:
                 gap_max = st.slider("최대 투자금 (갭)", 1, 20, 10)
-        
-        # 3. 데이터 필터링
-        # (문자열로 저장된 숫자가 있을 수 있으므로 변환)
+            with c3:
+                # 지역 필터 추가
+                all_regions = ["전체"] + sorted(df_sheet['지역'].unique().tolist())
+                selected_region = st.selectbox("지역 선택", all_regions)
+
+        # 데이터 필터링
         df_sheet['매매가(억)'] = pd.to_numeric(df_sheet['매매가(억)'], errors='coerce').fillna(0)
         df_sheet['갭(억)'] = pd.to_numeric(df_sheet['갭(억)'], errors='coerce').fillna(0)
         
@@ -123,7 +120,10 @@ with tab1:
             (df_sheet['갭(억)'] <= gap_max)
         ]
         
-        # 4. 결과 출력
+        if selected_region != "전체":
+            df_filtered = df_filtered[df_filtered['지역'] == selected_region]
+        
+        # 결과 출력
         col1, col2 = st.columns(2)
         
         with col1:
@@ -149,11 +149,9 @@ with tab2:
     st.header("💬 AI 부동산 투자 자문")
     
     if not df_sheet.empty:
-        # 아파트 선택
         all_apts = sorted(df_sheet['아파트명'].unique())
         selected_apt = st.selectbox("상담할 아파트 선택", all_apts, index=None, placeholder="아파트를 선택하세요...")
         
-        # 세션 상태 관리 (대화 기록)
         if 'chat_history' not in st.session_state: st.session_state['chat_history'] = []
         if 'last_apt' not in st.session_state: st.session_state['last_apt'] = None
         
@@ -162,7 +160,6 @@ with tab2:
             st.session_state['last_apt'] = selected_apt
             
         if selected_apt:
-            # 선택된 아파트 정보 가져오기
             target_row = df_sheet[df_sheet['아파트명'] == selected_apt].iloc[0]
             
             c1, c2, c3 = st.columns(3)
@@ -170,32 +167,30 @@ with tab2:
             c2.metric("예상 전세", f"{target_row['전세가(억)']}억")
             c3.metric("필요 갭", f"{target_row['갭(억)']}억")
             
-            # 최초 분석 버튼
             if st.button("🚀 AI 심층 분석 시작", type="primary"):
                 prompt = f"""
-                당신은 부동산 투자 전문가입니다. 아래 데이터를 바탕으로 분석해주세요.
+                당신은 부동산 투자 전문가입니다. 
                 [매물] {target_row['아파트명']} ({target_row['지역']})
                 - 현재호가: {target_row['매매가(억)']}억 (호가범위: {target_row['호가범위']})
                 - 사용자 자금: 현금 {user_cash}억, 연소득 {user_income}천만
                 
-                1. 가격 적정성 평가 (주변 시세 대비)
-                2. 매수 가능 여부 (자금력 판단)
-                3. 투자 가치 및 향후 전망
+                1. 가격 적정성 평가
+                2. 매수 가능 여부 (영끌 위험도)
+                3. 향후 전망 및 투자 가치
                 
-                위 내용을 마크다운으로 깔끔하게 정리해줘.
+                위 내용을 마크다운으로 정리해줘.
                 """
-                with st.spinner("AI가 네이버 호가를 분석 중입니다..."):
+                with st.spinner("분석 중..."):
                     try:
                         model = genai.GenerativeModel('gemini-flash-latest')
                         res = model.generate_content(prompt)
                         st.session_state['chat_history'].append({"role": "assistant", "content": res.text})
                     except Exception as e: st.error(f"오류: {e}")
             
-            # 채팅 인터페이스
             for msg in st.session_state['chat_history']:
                 with st.chat_message(msg['role']): st.markdown(msg['content'])
             
-            if user_input := st.chat_input("추가 질문 (예: 전세 잘 나갈까? 학군은 어때?)"):
+            if user_input := st.chat_input("추가 질문 입력"):
                 with st.chat_message("user"): st.markdown(user_input)
                 st.session_state['chat_history'].append({"role": "user", "content": user_input})
                 
@@ -203,11 +198,9 @@ with tab2:
                     with st.spinner("생각 중..."):
                         try:
                             model = genai.GenerativeModel('gemini-flash-latest')
-                            # 문맥(Context) 구성
-                            context = f"아파트: {target_row['아파트명']}, 가격: {target_row['매매가(억)']}억\n"
+                            context = f"아파트: {target_row['아파트명']}, 가격: {target_row['매매가(억)']}억"
                             history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state['chat_history'][-3:]])
                             final_prompt = f"{context}\n{history}\nUser: {user_input}\nAssistant:"
-                            
                             res = model.generate_content(final_prompt)
                             st.markdown(res.text)
                             st.session_state['chat_history'].append({"role": "assistant", "content": res.text})
@@ -218,42 +211,59 @@ with tab2:
 # ==========================================================================
 with tab3:
     st.header("⚙️ 데이터 수집 및 업데이트")
-    st.warning("⚠️ 이 기능은 반드시 '내 컴퓨터(Localhost)'에서 실행하세요. 클라우드에서는 차단될 수 있습니다.")
+    st.warning("⚠️ '내 컴퓨터'에서 아이콘을 더블클릭하여 실행해주세요.")
     
+    # [최종 확장] 서울 25개구 + 경기 핵심지역 코드 매핑
     naver_regions = {
-        "서울 강남구": "1168000000", "서울 서초구": "1165000000", "서울 송파구": "1171000000",
-        "서울 용산구": "1117000000", "서울 성동구": "1120000000", "서울 마포구": "1144000000",
-        "서울 영등포구": "1156000000", "서울 양천구": "1147000000", "서울 강동구": "1174000000",
-        "서울 금천구": "1154500000", "서울 구로구": "1153000000", "서울 관악구": "1162000000",
-        "경기 성남 분당": "4113500000", "경기 과천": "4129000000", "경기 하남": "4145000000",
-        "경기 안양 동안": "4117300000", "경기 수원 영통": "4111700000", "경기 광명": "4121000000"
+        # 서울 (가나다순)
+        "서울 강남구": "1168000000", "서울 강동구": "1174000000", "서울 강북구": "1130500000", 
+        "서울 강서구": "1150000000", "서울 관악구": "1162000000", "서울 광진구": "1121500000", 
+        "서울 구로구": "1153000000", "서울 금천구": "1154500000", "서울 노원구": "1135000000", 
+        "서울 도봉구": "1132000000", "서울 동대문구": "1123000000", "서울 동작구": "1159000000", 
+        "서울 마포구": "1144000000", "서울 서대문구": "1141000000", "서울 서초구": "1165000000", 
+        "서울 성동구": "1120000000", "서울 성북구": "1129000000", "서울 송파구": "1171000000", 
+        "서울 양천구": "1147000000", "서울 영등포구": "1156000000", "서울 용산구": "1117000000", 
+        "서울 은평구": "1138000000", "서울 종로구": "1111000000", "서울 중구": "1114000000", 
+        "서울 중랑구": "1126000000",
+        
+        # 경기 핵심지
+        "경기 성남 분당": "4113500000", "경기 성남 수정(판교/위례)": "4113100000",
+        "경기 과천": "4129000000", "경기 광명": "4121000000", 
+        "경기 안양 동안(평촌)": "4117300000", "경기 수원 영통(광교)": "4111700000", 
+        "경기 용인 수지": "4146500000", "경기 하남(미사/감일)": "4145000000", 
+        "경기 화성(동탄)": "4159000000"
     }
     
-    targets = st.multiselect("업데이트할 지역 선택", list(naver_regions.keys()), default=["서울 금천구"])
+    # 기본 선택: 강남, 서초, 송파, 분당
+    default_selections = ["서울 강남구", "서울 서초구", "서울 송파구", "경기 성남 분당"]
+    targets = st.multiselect("업데이트할 지역 선택", list(naver_regions.keys()), default=default_selections)
     
     if st.button("🚀 네이버 호가 수집 및 DB 저장"):
-        progress = st.progress(0, text="수집 시작...")
-        collected_data = []
-        
-        for i, region in enumerate(targets):
-            progress.progress((i+1)/len(targets), text=f"[{region}] 수집 중...")
-            df_res = get_naver_real_estate_data(naver_regions[region], region)
-            if df_res is not None and not df_res.empty:
-                collected_data.append(df_res)
-            time.sleep(random.uniform(1, 2)) # 차단 방지 딜레이
-            
-        progress.empty()
-        
-        if collected_data:
-            final_df = pd.concat(collected_data, ignore_index=True)
-            
-            # DB(구글 시트)에 덮어쓰기
-            try:
-                conn.update(data=final_df)
-                st.success(f"✅ 총 {len(final_df)}개 데이터 수집 및 구글 시트 저장 완료!")
-                st.dataframe(final_df.head())
-                st.info("이제 '추천 랭킹' 탭으로 이동해서 분석을 시작하세요.")
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
+        if not targets:
+            st.error("지역을 하나 이상 선택해주세요.")
         else:
-            st.error("수집된 데이터가 없습니다.")
+            progress = st.progress(0, text="수집 시작...")
+            collected_data = []
+            
+            for i, region in enumerate(targets):
+                progress.progress((i+1)/len(targets), text=f"[{region}] 호가 긁어오는 중... ({i+1}/{len(targets)})")
+                df_res = get_naver_real_estate_data(naver_regions[region], region)
+                if df_res is not None and not df_res.empty:
+                    collected_data.append(df_res)
+                time.sleep(random.uniform(0.5, 1.5)) # 차단 방지 딜레이
+                
+            progress.empty()
+            
+            if collected_data:
+                final_df = pd.concat(collected_data, ignore_index=True)
+                
+                # DB(구글 시트)에 덮어쓰기
+                try:
+                    conn.update(data=final_df)
+                    st.success(f"✅ 총 {len(final_df)}개 아파트 단지 데이터 저장 완료!")
+                    st.dataframe(final_df.head())
+                    st.info("Tip: 왼쪽 '추천 랭킹' 탭으로 이동해서 결과를 확인하세요.")
+                except Exception as e:
+                    st.error(f"저장 실패: {e}")
+            else:
+                st.error("수집된 데이터가 없습니다. (네이버 차단 가능성 있음 -> 잠시 후 다시 시도)")
