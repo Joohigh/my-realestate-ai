@@ -98,7 +98,11 @@ with tab1:
     except:
         df_sheet = pd.DataFrame()
     
-    if not df_sheet.empty:
+    # [안전장치] 데이터가 없거나 필수 컬럼이 없으면 안내 메시지 출력
+    required_cols = ['아파트명', '지역', '매매가(억)', '갭(억)', '호가범위']
+    is_valid_data = not df_sheet.empty and all(col in df_sheet.columns for col in required_cols)
+
+    if is_valid_data:
         # 필터 UI
         with st.expander("🕵️‍♂️ 조건 검색 (필터)", expanded=True):
             c1, c2, c3 = st.columns(3)
@@ -107,11 +111,10 @@ with tab1:
             with c2:
                 gap_max = st.slider("최대 투자금 (갭)", 1, 20, 10)
             with c3:
-                # 지역 필터 추가
                 all_regions = ["전체"] + sorted(df_sheet['지역'].unique().tolist())
                 selected_region = st.selectbox("지역 선택", all_regions)
 
-        # 데이터 필터링
+        # 데이터 형변환 (에러 방지)
         df_sheet['매매가(억)'] = pd.to_numeric(df_sheet['매매가(억)'], errors='coerce').fillna(0)
         df_sheet['갭(억)'] = pd.to_numeric(df_sheet['갭(억)'], errors='coerce').fillna(0)
         
@@ -128,19 +131,26 @@ with tab1:
         
         with col1:
             st.subheader(f"🏡 실거주 추천 (저렴한 순)")
-            st.dataframe(
-                df_filtered.sort_values(by='매매가(억)')[['아파트명', '지역', '매매가(억)', '호가범위']].style.format({'매매가(억)': '{:.1f}'}),
-                height=500, use_container_width=True
-            )
+            if not df_filtered.empty:
+                st.dataframe(
+                    df_filtered.sort_values(by='매매가(억)')[['아파트명', '지역', '매매가(억)', '호가범위']].style.format({'매매가(억)': '{:.1f}'}),
+                    height=500, use_container_width=True
+                )
+            else:
+                st.info("조건에 맞는 매물이 없습니다.")
             
         with col2:
             st.subheader(f"💰 갭투자 추천 (갭 작은 순)")
-            st.dataframe(
-                df_filtered.sort_values(by='갭(억)')[['아파트명', '지역', '매매가(억)', '갭(억)']].style.format({'매매가(억)': '{:.1f}', '갭(억)': '{:.1f}'}),
-                height=500, use_container_width=True
-            )
+            if not df_filtered.empty:
+                st.dataframe(
+                    df_filtered.sort_values(by='갭(억)')[['아파트명', '지역', '매매가(억)', '갭(억)']].style.format({'매매가(억)': '{:.1f}', '갭(억)': '{:.1f}'}),
+                    height=500, use_container_width=True
+                )
+            else:
+                st.info("조건에 맞는 매물이 없습니다.")
     else:
-        st.warning("⚠️ 데이터베이스가 비어있습니다. [데이터 관리] 탭에서 수집을 먼저 진행해주세요.")
+        st.warning("⚠️ 데이터베이스가 비어있거나 형식이 다릅니다.")
+        st.info("👉 **[데이터 관리(수집)]** 탭으로 이동해서 **'네이버 호가 수집'** 버튼을 한 번 눌러주세요!")
 
 # ==========================================================================
 # TAB 2: AI 심층 분석 & 채팅
@@ -148,7 +158,7 @@ with tab1:
 with tab2:
     st.header("💬 AI 부동산 투자 자문")
     
-    if not df_sheet.empty:
+    if is_valid_data:
         all_apts = sorted(df_sheet['아파트명'].unique())
         selected_apt = st.selectbox("상담할 아파트 선택", all_apts, index=None, placeholder="아파트를 선택하세요...")
         
@@ -205,6 +215,8 @@ with tab2:
                             st.markdown(res.text)
                             st.session_state['chat_history'].append({"role": "assistant", "content": res.text})
                         except Exception as e: st.error(f"오류: {e}")
+    else:
+        st.info("👉 먼저 **[데이터 관리(수집)]** 탭에서 데이터를 수집해주세요.")
 
 # ==========================================================================
 # TAB 3: 데이터 관리 (로컬 실행용)
@@ -213,7 +225,6 @@ with tab3:
     st.header("⚙️ 데이터 수집 및 업데이트")
     st.warning("⚠️ '내 컴퓨터'에서 아이콘을 더블클릭하여 실행해주세요.")
     
-    # [최종 확장] 서울 25개구 + 경기 핵심지역 코드 매핑
     naver_regions = {
         # 서울 (가나다순)
         "서울 강남구": "1168000000", "서울 강동구": "1174000000", "서울 강북구": "1130500000", 
@@ -234,7 +245,7 @@ with tab3:
         "경기 화성(동탄)": "4159000000"
     }
     
-    # 기본 선택: 강남, 서초, 송파, 분당
+    # 기본 선택
     default_selections = ["서울 강남구", "서울 서초구", "서울 송파구", "경기 성남 분당"]
     targets = st.multiselect("업데이트할 지역 선택", list(naver_regions.keys()), default=default_selections)
     
@@ -250,20 +261,19 @@ with tab3:
                 df_res = get_naver_real_estate_data(naver_regions[region], region)
                 if df_res is not None and not df_res.empty:
                     collected_data.append(df_res)
-                time.sleep(random.uniform(0.5, 1.5)) # 차단 방지 딜레이
+                time.sleep(random.uniform(0.5, 1.5)) 
                 
             progress.empty()
             
             if collected_data:
                 final_df = pd.concat(collected_data, ignore_index=True)
                 
-                # DB(구글 시트)에 덮어쓰기
                 try:
                     conn.update(data=final_df)
                     st.success(f"✅ 총 {len(final_df)}개 아파트 단지 데이터 저장 완료!")
                     st.dataframe(final_df.head())
-                    st.info("Tip: 왼쪽 '추천 랭킹' 탭으로 이동해서 결과를 확인하세요.")
+                    st.info("이제 '추천 랭킹' 탭으로 이동해서 분석을 시작하세요.")
                 except Exception as e:
                     st.error(f"저장 실패: {e}")
             else:
-                st.error("수집된 데이터가 없습니다. (네이버 차단 가능성 있음 -> 잠시 후 다시 시도)")
+                st.error("수집된 데이터가 없습니다. (네이버 차단 가능성 있음)")
