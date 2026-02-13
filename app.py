@@ -10,7 +10,7 @@ from datetime import datetime
 # --------------------------------------------------------------------------
 # [1] 기본 설정
 # --------------------------------------------------------------------------
-st.set_page_config(page_title="AI 부동산 (Naver DB)", layout="wide")
+st.set_page_config(page_title="AI 부동산 (Naver Mobile)", layout="wide")
 
 if "GOOGLE_API_KEY" not in st.secrets:
     st.error("🚨 secrets.toml 오류: GOOGLE_API_KEY가 없습니다.")
@@ -18,49 +18,51 @@ if "GOOGLE_API_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Robust Ver.)")
-st.caption("서울 전역 + 경기 핵심지 네이버 호가 분석 (차단 회피 강화)")
+st.title("🏙️ AI 부동산 통합 솔루션 (Mobile Bypass)")
+st.caption("네이버 모바일 API 우회 접속 (차단 회피 최적화)")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
-# [함수] 네이버 크롤링 (강력한 차단 회피)
+# [함수] 네이버 모바일 크롤링 (차단 회피 핵심)
 # --------------------------------------------------------------------------
 def get_naver_real_estate_data(region_code, region_name):
-    # PC 버전 API 사용 (모바일보다 데이터가 정확하고 차단이 덜함)
-    url = f"https://new.land.naver.com/api/regions/complexes?cortarNo={region_code}&realEstateType=APT&order=price"
+    # [핵심] 모바일 전용 주소 사용 (보안이 덜 까다로움)
+    url = "https://m.land.naver.com/complex/ajax/complexListByCortarNo"
     
-    # [핵심] 완벽한 브라우저 위장 (크롬 브라우저인 척)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://new.land.naver.com/",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive"
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.162 Mobile Safari/537.36",
+        "Referer": "https://m.land.naver.com/",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+    
+    # rletTpCd: APT(아파트), tradTpCd: A1(매매)
+    params = {
+        "cortarNo": region_code,
+        "rletTpCd": "APT",
+        "order": "price",
+        "tradTpCd": "A1"
     }
     
     try:
-        session = requests.Session()
-        response = session.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        # [디버깅] 상태 코드 확인
+        # 접속 실패 시
         if response.status_code != 200:
-            st.toast(f"⚠️ [{region_name}] 차단됨 (Code: {response.status_code})")
+            st.error(f"⚠️ [{region_name}] 서버 응답 오류: {response.status_code}")
             return None
             
         data = response.json()
-        complex_list = data.get("complexList", [])
+        result_list = data.get("result", [])
         
         parsed_data = []
-        for item in complex_list:
+        for item in result_list:
             try:
-                # 100세대 미만 제외 (노이즈 제거)
-                if item.get("totalHouseholdCount", 0) < 100:
-                    continue
-
-                name = item.get("complexName", "")
-                min_price = item.get("minDealPrice", 0) # 최저 매매 호가
-                max_price = item.get("maxDealPrice", 0)
+                # [중요] 모바일 데이터는 이름표가 다릅니다 (nm, minPrc 등)
+                name = item.get("nm", "") # 단지명
+                
+                # 가격 정보 (단위: 만원)
+                min_price = item.get("minPrc", 0) 
+                max_price = item.get("maxPrc", 0)
                 
                 # 억 단위 변환
                 sale_price_val = int(min_price) / 10000 if min_price else 0
@@ -70,16 +72,19 @@ def get_naver_real_estate_data(region_code, region_name):
                         "아파트명": name,
                         "지역": region_name,
                         "매매가(억)": sale_price_val,
-                        "전세가(억)": sale_price_val * 0.6, # 전세가율 60% 가정
-                        "갭(억)": sale_price_val * 0.4,     # 갭 40% 가정
+                        # 모바일 리스트에는 전세가가 같이 안 와서, 매매가의 60%로 추정 (안전하게)
+                        "전세가(억)": sale_price_val * 0.6, 
+                        "갭(억)": sale_price_val * 0.4, 
                         "호가범위": f"{int(min_price/10000)}~{int(max_price/10000)}억",
                         "수집일": datetime.now().strftime("%Y-%m-%d")
                     }
                     parsed_data.append(row)
             except: continue
+            
         return pd.DataFrame(parsed_data)
+
     except Exception as e:
-        st.toast(f"❌ [{region_name}] 에러 발생: {e}")
+        st.error(f"❌ [{region_name}] 시스템 에러: {e}")
         return None
 
 # --------------------------------------------------------------------------
@@ -94,14 +99,14 @@ with st.sidebar:
     st.info("💡 데이터 업데이트가 필요할 때만 [데이터 관리] 탭을 이용하세요.")
 
 # --------------------------------------------------------------------------
-# [3] 메인 기능 (탭 구성)
+# [3] 메인 기능
 # --------------------------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(["🏆 추천 랭킹", "🤖 AI 심층 분석 & 채팅", "⚙️ 데이터 관리(수집)"])
 
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except:
-    st.error("구글 시트 연결 실패. secrets.toml을 확인하세요.")
+    st.error("구글 시트 연결 실패.")
     st.stop()
 
 # ==========================================================================
@@ -142,7 +147,6 @@ with tab1:
         if selected_region != "전체":
             df_filtered = df_filtered[df_filtered['지역'] == selected_region]
         
-        # 결과 출력
         col1, col2 = st.columns(2)
         with col1:
             st.subheader(f"🏡 실거주 추천")
@@ -162,11 +166,10 @@ with tab1:
                 )
             else: st.info("매물이 없습니다.")
     else:
-        st.warning("⚠️ 데이터베이스가 비어있습니다.")
-        st.info("👉 **[데이터 관리(수집)]** 탭에서 데이터를 수집해주세요.")
+        st.warning("⚠️ 데이터가 없습니다. [데이터 관리] 탭에서 수집해주세요.")
 
 # ==========================================================================
-# TAB 2: AI 심층 분석 & 채팅
+# TAB 2: AI 심층 분석
 # ==========================================================================
 with tab2:
     st.header("💬 AI 부동산 투자 자문")
@@ -232,45 +235,37 @@ with tab2:
         st.info("👉 먼저 **[데이터 관리(수집)]** 탭에서 데이터를 수집해주세요.")
 
 # ==========================================================================
-# TAB 3: 데이터 관리 (로컬 실행용)
+# TAB 3: 데이터 관리 (수집)
 # ==========================================================================
 with tab3:
     st.header("⚙️ 데이터 수집 및 업데이트")
-    st.info("ℹ️ 브라우저 주소창이 'localhost'인지 꼭 확인하세요. 클라우드에서는 작동하지 않습니다.")
+    st.info("모바일 우회 모드로 작동합니다. (PC에서도 실행 가능)")
     
     naver_regions = {
         "서울 강남구": "1168000000", "서울 서초구": "1165000000", "서울 송파구": "1171000000",
         "서울 용산구": "1117000000", "서울 성동구": "1120000000", "서울 마포구": "1144000000",
         "서울 영등포구": "1156000000", "서울 양천구": "1147000000", "서울 강동구": "1174000000", 
-        "서울 강북구": "1130500000", "서울 강서구": "1150000000", "서울 관악구": "1162000000", 
-        "서울 광진구": "1121500000", "서울 구로구": "1153000000", "서울 금천구": "1154500000", 
-        "서울 노원구": "1135000000", "서울 도봉구": "1132000000", "서울 동대문구": "1123000000", 
-        "서울 동작구": "1159000000", "서울 서대문구": "1141000000", "서울 성북구": "1129000000", 
-        "서울 은평구": "1138000000", "서울 종로구": "1111000000", "서울 중구": "1114000000", 
-        "서울 중랑구": "1126000000",
-        
+        "서울 금천구": "1154500000", "서울 구로구": "1153000000", "서울 관악구": "1162000000",
         "경기 성남 분당": "4113500000", "경기 과천": "4129000000", "경기 하남": "4145000000",
-        "경기 안양 동안": "4117300000", "경기 수원 영통": "4111700000", "경기 광명": "4121000000",
-        "경기 용인 수지": "4146500000", "경기 화성(동탄)": "4159000000"
+        "경기 안양 동안": "4117300000", "경기 수원 영통": "4111700000", "경기 광명": "4121000000"
     }
     
-    default_selections = ["서울 강남구"]
-    targets = st.multiselect("업데이트할 지역 선택", list(naver_regions.keys()), default=default_selections)
+    targets = st.multiselect("업데이트할 지역 선택", list(naver_regions.keys()), default=["서울 강남구"])
     
     if st.button("🚀 네이버 호가 수집 및 DB 저장"):
         if not targets:
-            st.error("지역을 하나 이상 선택해주세요.")
+            st.error("지역을 선택해주세요.")
         else:
             progress = st.progress(0, text="수집 시작...")
             collected_data = []
             
             for i, region in enumerate(targets):
-                progress.progress((i+1)/len(targets), text=f"[{region}] 호가 긁어오는 중...")
+                progress.progress((i+1)/len(targets), text=f"[{region}] 모바일 접속 중...")
                 df_res = get_naver_real_estate_data(naver_regions[region], region)
                 if df_res is not None and not df_res.empty:
                     collected_data.append(df_res)
-                # 차단 방지를 위해 랜덤 대기 시간 (중요!)
-                time.sleep(random.uniform(2.0, 4.0)) 
+                # 너무 빠르면 모바일도 차단될 수 있으니 1초 대기
+                time.sleep(1) 
                 
             progress.empty()
             
@@ -278,8 +273,10 @@ with tab3:
                 final_df = pd.concat(collected_data, ignore_index=True)
                 try:
                     conn.update(data=final_df)
-                    st.success(f"✅ 총 {len(final_df)}개 단지 저장 완료! '추천 랭킹' 탭을 확인하세요.")
+                    st.success(f"✅ 총 {len(final_df)}개 아파트 단지 데이터 저장 완료!")
+                    st.dataframe(final_df.head())
                 except Exception as e:
                     st.error(f"저장 실패: {e}")
             else:
-                st.error("수집된 데이터가 없습니다. (네이버에서 IP를 일시 차단했을 수 있습니다)")
+                st.error("수집된 데이터가 없습니다. (URL 변경 또는 강력 차단 상태)")
+                st.write("해결책: 잠시 후(10분 뒤) 다시 시도해보세요.")
