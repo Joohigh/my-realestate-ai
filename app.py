@@ -113,7 +113,13 @@ with st.sidebar:
         df_trade_list = []
         df_rent_list = []
         now = datetime.now()
-        months = [now.strftime("%Y%m"), (now.replace(day=1) - timedelta(days=1)).strftime("%Y%m")]
+        
+        # 🚀 변경: 최근 6개월치 수집으로 확장!
+        months = []
+        temp_date = now
+        for _ in range(6): # 6개월치 (원하면 12로 늘려도 됩니다)
+            months.append(temp_date.strftime("%Y%m"))
+            temp_date = temp_date.replace(day=1) - timedelta(days=1)
         
         total = len(target_districts) * len(months) * 2
         step = 0
@@ -329,19 +335,31 @@ with tab2:
             st.divider()
 
             st.header("💬 AI 부동산 투자 자문 (Chat)")
-            st.info("위 리스트에서 관심 있는 아파트를 발견하셨나요? 여기서 선택해서 AI와 상담해보세요.")
+            st.info("위 리스트에서 관심 있는 아파트를 발견하셨나요? 지역이나 아파트명을 검색해 AI와 상담해보세요.")
 
-            apt_list = sorted(df_sheet['아파트명'].dropna().unique().tolist())
-            selected_apt = st.selectbox("상담할 아파트 선택", apt_list, index=None, placeholder="아파트명을 선택하세요...")
+            # [핵심 수정] 동명이인 아파트를 구별하기 위한 '고유 선택키' 만들기
+            # 예: "서울 강남구 대치동 은마아파트 (1979년식, 31.0평)"
+            df_sheet['선택키'] = df_sheet['지역'] + " " + df_sheet['아파트명'] + " (" + df_sheet['건축년도'].astype(str) + "년식, " + df_sheet['평형'].astype(str) + "평)"
+            
+            # 선택키 리스트를 만들고 정렬
+            apt_list = sorted(df_sheet['선택키'].dropna().unique().tolist())
+            
+            selected_key = st.selectbox(
+                "상담할 매물 검색 (지역, 아파트명, 평형 등으로 검색 가능)", 
+                apt_list, 
+                index=None, 
+                placeholder="예: 강남구 은마, 혹은 분당구 무지개..."
+            )
             
             if 'last_selected_apt' not in st.session_state: st.session_state['last_selected_apt'] = None
-            if selected_apt != st.session_state['last_selected_apt']:
+            if selected_key != st.session_state['last_selected_apt']:
                 st.session_state['messages'] = []
-                st.session_state['last_selected_apt'] = selected_apt
+                st.session_state['last_selected_apt'] = selected_key
                 st.session_state['context_prompt'] = ""
 
-            if selected_apt:
-                target = df_sheet[df_sheet['아파트명'] == selected_apt].iloc[0]
+            if selected_key:
+                # 이름이 아닌 '선택키'로 정확한 해당 아파트 데이터만 콕 집어서 가져오기
+                target = df_sheet[df_sheet['선택키'] == selected_key].iloc[0]
                 
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("아파트 스펙", f"{target.get('건축년도','-')}년식 ({target.get('층','-')}층)")
