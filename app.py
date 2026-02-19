@@ -28,7 +28,6 @@ st.markdown("---")
 # [함수] 정부 서버 직접 접속 (매매 & 전월세)
 # --------------------------------------------------------------------------
 def fetch_trade_data(lawd_cd, deal_ymd, service_key):
-    """매매 실거래가 수집 (+층, 건축년도)"""
     url = "http://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
     params = {"serviceKey": service_key, "LAWD_CD": lawd_cd, "DEAL_YMD": deal_ymd, "numOfRows": 1000, "pageNo": 1}
     try:
@@ -55,7 +54,6 @@ def fetch_trade_data(lawd_cd, deal_ymd, service_key):
     return None
 
 def fetch_rent_data(lawd_cd, deal_ymd, service_key):
-    """전월세 실거래가 수집"""
     url = "http://openapi.molit.go.kr/OpenAPI_ToolInstallPackage/service/rest/RTMSOBJSvc/getRTMSDataSvcAptRent"
     params = {"serviceKey": service_key, "LAWD_CD": lawd_cd, "DEAL_YMD": deal_ymd, "numOfRows": 1000, "pageNo": 1}
     try:
@@ -93,7 +91,6 @@ with st.sidebar:
         "서울 강남구": "11680", "서울 강동구": "11740", "서울 송파구": "11710",
         "서울 서초구": "11650", "서울 마포구": "11440", "서울 용산구": "11170",
         "경기 성남 분당": "41135", "경기 과천시": "41290"
-        # 필요시 위 딕셔너리에 원하시는 지역을 더 추가하세요!
     }
     district_options = ["전체 지역 (목록 전체)"] + sorted(list(district_code.keys()))
     selected_option = st.selectbox("수집할 지역(구)", district_options)
@@ -112,7 +109,6 @@ with st.sidebar:
         
         for name, code in target_districts.items():
             for ym in months:
-                # 1. 매매 데이터 수집
                 step += 1
                 progress_bar.progress(step / total, text=f"[{name}] {ym} 매매 수신 중...")
                 df_raw_trade = fetch_trade_data(code, ym, api_key_decoded)
@@ -121,7 +117,6 @@ with st.sidebar:
                     df_trade_list.append(df_raw_trade)
                 time.sleep(0.1)
 
-                # 2. 전월세 데이터 수집
                 step += 1
                 progress_bar.progress(step / total, text=f"[{name}] {ym} 전월세 수신 중...")
                 df_raw_rent = fetch_rent_data(code, ym, api_key_decoded)
@@ -132,7 +127,6 @@ with st.sidebar:
         progress_bar.empty()
         
         if df_trade_list:
-            # 매매 데이터 정리
             df_all_trade = pd.concat(df_trade_list, ignore_index=True)
             df_clean = pd.DataFrame()
             df_clean['아파트명'] = df_all_trade['아파트']
@@ -143,19 +137,16 @@ with st.sidebar:
             df_clean['매매가(억)'] = pd.to_numeric(df_all_trade['거래금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int) / 10000
             df_clean['거래일'] = df_all_trade['년'] + "-" + df_all_trade['월'].astype(str).str.zfill(2) + "-" + df_all_trade['일'].astype(str).str.zfill(2)
             
-            # 전월세 데이터 처리 및 병합 (아파트+평형 기준 평균가 계산)
             if df_rent_list:
                 df_all_rent = pd.concat(df_rent_list, ignore_index=True)
                 df_all_rent['평형'] = pd.to_numeric(df_all_rent['전용면적'], errors='coerce').fillna(0).apply(lambda x: round(x / 3.3, 1))
                 df_all_rent['보증금(억)'] = pd.to_numeric(df_all_rent['보증금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int) / 10000
                 df_all_rent['월세(만)'] = pd.to_numeric(df_all_rent['월세금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int)
                 
-                # 아파트별/평형별 전세 평균 계산
                 rent_avg = df_all_rent.groupby(['아파트', '평형'])[['보증금(억)', '월세(만)']].mean().reset_index()
                 
-                # 매매 데이터에 병합
                 df_clean = pd.merge(df_clean, rent_avg, how='left', left_on=['아파트명', '평형'], right_on=['아파트', '평형'])
-                df_clean['전세가(억)'] = df_clean['보증금(억)'].fillna(df_clean['매매가(억)'] * 0.6) # 전세가 없으면 매매가의 60%로 추정
+                df_clean['전세가(억)'] = df_clean['보증금(억)'].fillna(df_clean['매매가(억)'] * 0.6)
                 df_clean['월세보증금(억)'] = df_clean['보증금(억)'].fillna(0)
                 df_clean['월세액(만원)'] = df_clean['월세(만)'].fillna(0)
             else:
@@ -167,10 +158,9 @@ with st.sidebar:
             df_clean['입지점수'] = 0
             df_clean = df_clean.sort_values(by='거래일', ascending=False)
             
-            # 중복 컬럼 정리
             cols_to_keep = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
             st.session_state['fetched_data'] = df_clean[cols_to_keep]
-            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전월세 실거래가 연동 완료)")
+            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전월세 연동)")
         else:
             st.warning("⚠️ 수집된 데이터가 없습니다.")
 
@@ -209,8 +199,13 @@ with tab1:
                 try: df_current = conn.read(ttl=0)
                 except: df_current = pd.DataFrame()
 
-                # DB 저장 시 층과 건축년도 컬럼 추가
                 cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '전고점(억)', '입지점수']
+                
+                # 안전장치: 현재 시트에 '층'과 '건축년도'가 없으면 강제로 추가해줌
+                if not df_current.empty:
+                    if '층' not in df_current.columns: df_current['층'] = "-"
+                    if '건축년도' not in df_current.columns: df_current['건축년도'] = "-"
+
                 if df_current.empty: final_df = df_new[cols].copy()
                 else:
                     current_dict = {f"{str(r['아파트명']).replace(' ', '').strip()}_{r['평형']}": r.to_dict() for _, r in df_current.iterrows()}
@@ -236,7 +231,11 @@ with tab2:
     try:
         df_sheet = conn.read(ttl=0)
         
+        # 안전장치: 시트에 데이터가 존재하지만 '층', '건축년도'가 누락된 과거 데이터라면 임시로 채워줌
         if not df_sheet.empty and '매매가(억)' in df_sheet.columns:
+            if '층' not in df_sheet.columns: df_sheet['층'] = "-"
+            if '건축년도' not in df_sheet.columns: df_sheet['건축년도'] = "-"
+
             st.header("🏆 AI 추천 랭킹 (Ranking)")
             
             df_rank = df_sheet.copy()
@@ -306,7 +305,7 @@ with tab2:
                 target = df_sheet[df_sheet['아파트명'] == selected_apt].iloc[0]
                 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("아파트 스펙", f"{target.get('건축년도','')}년식 ({target.get('층','')}층)")
+                c1.metric("아파트 스펙", f"{target.get('건축년도','-')}년식 ({target.get('층','-')}층)")
                 c2.metric("실거래가", f"{target['매매가(억)']}억")
                 c3.metric("실제 전세가", f"{target['전세가(억)']:.2f}억")
                 c4.metric("입지점수", f"{target.get('입지점수', 0)}점")
@@ -317,7 +316,7 @@ with tab2:
                     
                     system_prompt = f"""
                     너는 최고의 부동산 투자 전문가야. 아래 팩트(국토부 실거래가)를 바탕으로 사용자와 대화해줘.
-                    [매물] {target['아파트명']} ({target['지역']}), {target.get('건축년도','')}년 건축, {target.get('층','')}층, {target['평형']}평
+                    [매물] {target['아파트명']} ({target['지역']}), {target.get('건축년도','-')}년 건축, {target.get('층','-')}층, {target['평형']}평
                     [가격] 최근 매매가 {target['매매가(억)']}억, 최근 평균 전세가 {target['전세가(억)']:.2f}억, 전고점 {target.get('전고점(억)', 0)}억
                     [재정] 현금 {user_cash}억, 연소득 {user_income}천만, 금리 {target_loan_rate}%, 예상 DSR {dsr_rough:.1f}%
                     
