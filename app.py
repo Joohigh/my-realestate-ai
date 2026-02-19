@@ -21,7 +21,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 st.title("🏙️ AI 부동산 통합 솔루션 (Capital Area Ver.)")
-st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도/날짜 완벽 연동] + [실제 전월세 반영] + [AI 채팅 자문]")
+st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도/날짜 완벽 연동] + [실제 전월세 스마트 매칭] + [AI 채팅 자문]")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -45,7 +45,6 @@ def fetch_trade_data(lawd_cd, deal_ymd, service_key):
                         "층": item.findtext("층") or item.findtext("floor") or "",
                         "건축년도": item.findtext("건축년도") or item.findtext("buildYear") or "",
                         "법정동": item.findtext("법정동") or item.findtext("umdNm") or "",
-                        # 날짜 양옆 공백 제거 보강
                         "년": (item.findtext("년") or item.findtext("dealYear") or "").strip(),
                         "월": (item.findtext("월") or item.findtext("dealMonth") or "").strip(),
                         "일": (item.findtext("일") or item.findtext("dealDay") or "").strip(),
@@ -55,7 +54,8 @@ def fetch_trade_data(lawd_cd, deal_ymd, service_key):
     return None
 
 def fetch_rent_data(lawd_cd, deal_ymd, service_key):
-    url = "http://openapi.molit.go.kr/OpenAPI_ToolInstallPackage/service/rest/RTMSOBJSvc/getRTMSDataSvcAptRent"
+    # [수정] 전월세 API 주소도 매매와 동일한 최신(v2) 주소로 변경!!
+    url = "http://apis.data.go.kr/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent"
     params = {"serviceKey": service_key, "LAWD_CD": lawd_cd, "DEAL_YMD": deal_ymd, "numOfRows": 1000, "pageNo": 1}
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -148,12 +148,14 @@ with st.sidebar:
             df_clean['건축년도'] = df_all_trade['건축년도']
             df_clean['매매가(억)'] = pd.to_numeric(df_all_trade['거래금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int) / 10000
             
-            # [수정] 날짜 문자열 합치기 로직 개선 (공백이나 누락 시 안전하게 처리)
             df_clean['년'] = df_all_trade['년'].astype(str).str.zfill(4)
             df_clean['월'] = df_all_trade['월'].astype(str).str.zfill(2)
             df_clean['일'] = df_all_trade['일'].astype(str).str.zfill(2)
-            # 날짜가 정상적이지 않으면(예: '0000-00-00') 오늘 날짜로라도 대체
             df_clean['거래일'] = df_clean.apply(lambda x: f"{x['년']}-{x['월']}-{x['일']}" if x['년'] != '0000' else now.strftime("%Y-%m-%d"), axis=1)
+            
+            # [수정] 짝맞추기를 위한 스마트 조인키 생성 (공백 제거 및 평형 정수화)
+            df_clean['조인키_아파트'] = df_clean['아파트명'].astype(str).str.replace(' ', '')
+            df_clean['조인키_평형'] = df_clean['평형'].apply(lambda x: int(x))
             
             if df_rent_list:
                 df_all_rent = pd.concat(df_rent_list, ignore_index=True)
@@ -161,9 +163,15 @@ with st.sidebar:
                 df_all_rent['보증금(억)'] = pd.to_numeric(df_all_rent['보증금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int) / 10000
                 df_all_rent['월세(만)'] = pd.to_numeric(df_all_rent['월세금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int)
                 
-                rent_avg = df_all_rent.groupby(['아파트', '평형'])[['보증금(억)', '월세(만)']].mean().reset_index()
+                # [수정] 스마트 조인키 생성
+                df_all_rent['조인키_아파트'] = df_all_rent['아파트'].astype(str).str.replace(' ', '')
+                df_all_rent['조인키_평형'] = df_all_rent['평형'].apply(lambda x: int(x))
                 
-                df_clean = pd.merge(df_clean, rent_avg, how='left', left_on=['아파트명', '평형'], right_on=['아파트', '평형'])
+                # 조인키를 기준으로 전월세 평균 계산
+                rent_avg = df_all_rent.groupby(['조인키_아파트', '조인키_평형'])[['보증금(억)', '월세(만)']].mean().reset_index()
+                
+                # 스마트 매칭(조인)
+                df_clean = pd.merge(df_clean, rent_avg, how='left', on=['조인키_아파트', '조인키_평형'])
                 df_clean['전세가(억)'] = df_clean['보증금(억)'].fillna(df_clean['매매가(억)'] * 0.6)
                 df_clean['월세보증금(억)'] = df_clean['보증금(억)'].fillna(0)
                 df_clean['월세액(만원)'] = df_clean['월세(만)'].fillna(0)
@@ -178,7 +186,7 @@ with st.sidebar:
             
             cols_to_keep = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
             st.session_state['fetched_data'] = df_clean[cols_to_keep]
-            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전월세 연동)")
+            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전월세 데이터 정상 연동됨)")
         else:
             st.warning("⚠️ 수집된 데이터가 없습니다.")
 
@@ -220,9 +228,8 @@ with tab1:
                 cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
                 
                 if not df_current.empty:
-                    if '층' not in df_current.columns: df_current['층'] = "-"
-                    if '건축년도' not in df_current.columns: df_current['건축년도'] = "-"
-                    if '거래일' not in df_current.columns: df_current['거래일'] = "-"
+                    for c in ['층', '건축년도', '거래일']:
+                        if c not in df_current.columns: df_current[c] = "-"
 
                 if df_current.empty: final_df = df_new[cols].copy()
                 else:
@@ -258,8 +265,8 @@ with tab2:
         df_sheet = conn.read(ttl=0)
         
         if not df_sheet.empty and '매매가(억)' in df_sheet.columns:
-            if '층' not in df_sheet.columns: df_sheet['층'] = "-"
-            if '건축년도' not in df_sheet.columns: df_sheet['건축년도'] = "-"
+            for c in ['층', '건축년도']:
+                if c not in df_sheet.columns: df_sheet[c] = "-"
 
             st.header("🏆 AI 추천 랭킹 (Ranking)")
             
