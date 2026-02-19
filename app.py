@@ -21,7 +21,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 st.title("🏙️ AI 부동산 통합 솔루션 (Capital Area Ver.)")
-st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도 완벽 연동] + [실제 전월세 반영] + [AI 채팅 자문]")
+st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도/날짜 완벽 연동] + [실제 전월세 반영] + [AI 채팅 자문]")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -45,9 +45,10 @@ def fetch_trade_data(lawd_cd, deal_ymd, service_key):
                         "층": item.findtext("층") or item.findtext("floor") or "",
                         "건축년도": item.findtext("건축년도") or item.findtext("buildYear") or "",
                         "법정동": item.findtext("법정동") or item.findtext("umdNm") or "",
-                        "년": item.findtext("년") or "",
-                        "월": item.findtext("월") or "",
-                        "일": item.findtext("일") or "",
+                        # 날짜 양옆 공백 제거 보강
+                        "년": (item.findtext("년") or item.findtext("dealYear") or "").strip(),
+                        "월": (item.findtext("월") or item.findtext("dealMonth") or "").strip(),
+                        "일": (item.findtext("일") or item.findtext("dealDay") or "").strip(),
                     })
                 return pd.DataFrame(data_list)
     except: return None
@@ -81,7 +82,7 @@ with st.sidebar:
     st.header("💰 내 재정 상황 (Private)")
     with st.expander("💸 자산 및 소득 입력 (클릭)", expanded=True):
         user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
-        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
+        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=8.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
     st.divider()
@@ -146,7 +147,13 @@ with st.sidebar:
             df_clean['층'] = df_all_trade['층']
             df_clean['건축년도'] = df_all_trade['건축년도']
             df_clean['매매가(억)'] = pd.to_numeric(df_all_trade['거래금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int) / 10000
-            df_clean['거래일'] = df_all_trade['년'] + "-" + df_all_trade['월'].astype(str).str.zfill(2) + "-" + df_all_trade['일'].astype(str).str.zfill(2)
+            
+            # [수정] 날짜 문자열 합치기 로직 개선 (공백이나 누락 시 안전하게 처리)
+            df_clean['년'] = df_all_trade['년'].astype(str).str.zfill(4)
+            df_clean['월'] = df_all_trade['월'].astype(str).str.zfill(2)
+            df_clean['일'] = df_all_trade['일'].astype(str).str.zfill(2)
+            # 날짜가 정상적이지 않으면(예: '0000-00-00') 오늘 날짜로라도 대체
+            df_clean['거래일'] = df_clean.apply(lambda x: f"{x['년']}-{x['월']}-{x['일']}" if x['년'] != '0000' else now.strftime("%Y-%m-%d"), axis=1)
             
             if df_rent_list:
                 df_all_rent = pd.concat(df_rent_list, ignore_index=True)
@@ -210,11 +217,12 @@ with tab1:
                 try: df_current = conn.read(ttl=0)
                 except: df_current = pd.DataFrame()
 
-                cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '전고점(억)', '입지점수']
+                cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
                 
                 if not df_current.empty:
                     if '층' not in df_current.columns: df_current['층'] = "-"
                     if '건축년도' not in df_current.columns: df_current['건축년도'] = "-"
+                    if '거래일' not in df_current.columns: df_current['거래일'] = "-"
 
                 if df_current.empty: final_df = df_new[cols].copy()
                 else:
@@ -222,14 +230,14 @@ with tab1:
                     for _, row in df_new.iterrows():
                         key = f"{str(row['아파트명']).replace(' ', '').strip()}_{row['평형']}"
                         if key in current_dict:
-                            # [핵심 버그 수정 부분] 여기에 '건축년도'도 덮어쓰도록 수정했습니다!!!
                             current_dict[key].update({
                                 '매매가(억)': row['매매가(억)'], 
                                 '층': row['층'], 
                                 '건축년도': row['건축년도'], 
                                 '전세가(억)': row['전세가(억)'],
                                 '월세보증금(억)': row['월세보증금(억)'],
-                                '월세액(만원)': row['월세액(만원)']
+                                '월세액(만원)': row['월세액(만원)'],
+                                '거래일': row['거래일']
                             })
                             if row['전고점(억)'] > 0: current_dict[key]['전고점(억)'] = row['전고점(억)']
                             if row['입지점수'] > 0: current_dict[key]['입지점수'] = row['입지점수']
@@ -238,7 +246,7 @@ with tab1:
                 
                 conn.update(data=final_df)
                 st.balloons()
-                st.success("✅ 저장 완료! 수도권 전체 데이터(건축년도 포함)가 완벽하게 업데이트되었습니다.")
+                st.success("✅ 저장 완료! 수도권 전체 데이터가 완벽하게 업데이트되었습니다.")
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"저장 실패: {e}")
@@ -372,4 +380,3 @@ with tab2:
                 
         else: st.warning("데이터가 없습니다. [데이터 확인 및 저장] 탭에서 데이터를 수집해주세요.")
     except Exception as e: st.error(f"오류: {e}")
-
