@@ -81,7 +81,7 @@ with st.sidebar:
     st.header("💰 내 재정 상황 (Private)")
     with st.expander("💸 자산 및 소득 입력 (클릭)", expanded=True):
         user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
-        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=8.0, step=0.5)
+        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
     st.divider()
@@ -372,3 +372,4 @@ with tab2:
                 
         else: st.warning("데이터가 없습니다. [데이터 확인 및 저장] 탭에서 데이터를 수집해주세요.")
     except Exception as e: st.error(f"오류: {e}")
+
