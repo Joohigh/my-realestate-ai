@@ -21,7 +21,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 st.title("🏙️ AI 부동산 통합 솔루션 (Capital Area Ver.)")
-st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도/날짜] + [실제 전월세 완벽 연동] + [AI 채팅 자문]")
+st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도/날짜] + [전/월세 완벽 분리 연동] + [AI 채팅 자문]")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -64,7 +64,6 @@ def fetch_rent_data(lawd_cd, deal_ymd, service_key):
                 items = root.findall(".//item")
                 data_list = []
                 for item in items:
-                    # [핵심 수정] 정부 API 최신 버전의 '영어 태그' 추가!!
                     data_list.append({
                         "아파트": item.findtext("아파트") or item.findtext("aptNm") or "",
                         "전용면적": item.findtext("전용면적") or item.findtext("excluUseAr") or "0",
@@ -165,12 +164,24 @@ with st.sidebar:
                 df_all_rent['조인키_아파트'] = df_all_rent['아파트'].astype(str).str.replace(' ', '')
                 df_all_rent['조인키_평형'] = df_all_rent['평형'].apply(lambda x: round(x))
                 
-                rent_avg = df_all_rent.groupby(['조인키_아파트', '조인키_평형'])[['보증금(억)', '월세(만)']].mean().reset_index()
+                # [핵심 버그 수정] 전세와 월세를 분리해서 각각 평균 계산
+                df_jeonse = df_all_rent[df_all_rent['월세(만)'] == 0] # 월세가 없는 순수 전세
+                df_monthly = df_all_rent[df_all_rent['월세(만)'] > 0] # 월세가 있는 반전세/월세
                 
-                df_clean = pd.merge(df_clean, rent_avg, how='left', on=['조인키_아파트', '조인키_평형'])
-                df_clean['전세가(억)'] = df_clean['보증금(억)'].fillna(df_clean['매매가(억)'] * 0.6)
-                df_clean['월세보증금(억)'] = df_clean['보증금(억)'].fillna(0)
-                df_clean['월세액(만원)'] = df_clean['월세(만)'].fillna(0)
+                jeonse_avg = df_jeonse.groupby(['조인키_아파트', '조인키_평형'])['보증금(억)'].mean().reset_index()
+                jeonse_avg.rename(columns={'보증금(억)': '평균전세가(억)'}, inplace=True)
+                
+                monthly_avg = df_monthly.groupby(['조인키_아파트', '조인키_평형'])[['보증금(억)', '월세(만)']].mean().reset_index()
+                monthly_avg.rename(columns={'보증금(억)': '평균월세보증금(억)', '월세(만)': '평균월세액(만)'}, inplace=True)
+                
+                # 매매 데이터에 전세와 월세 데이터를 각각 붙여넣기
+                df_clean = pd.merge(df_clean, jeonse_avg, how='left', on=['조인키_아파트', '조인키_평형'])
+                df_clean = pd.merge(df_clean, monthly_avg, how='left', on=['조인키_아파트', '조인키_평형'])
+                
+                # 병합된 데이터를 최종 컬럼명으로 정리
+                df_clean['전세가(억)'] = df_clean['평균전세가(억)'].fillna(df_clean['매매가(억)'] * 0.6)
+                df_clean['월세보증금(억)'] = df_clean['평균월세보증금(억)'].fillna(0)
+                df_clean['월세액(만원)'] = df_clean['평균월세액(만)'].fillna(0)
             else:
                 df_clean['전세가(억)'] = df_clean['매매가(억)'] * 0.6
                 df_clean['월세보증금(억)'] = 0
@@ -182,7 +193,7 @@ with st.sidebar:
             
             cols_to_keep = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
             st.session_state['fetched_data'] = df_clean[cols_to_keep]
-            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전월세 데이터 정상 연동됨)")
+            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전세와 월세가 완벽하게 분리되었습니다!)")
         else:
             st.warning("⚠️ 수집된 데이터가 없습니다.")
 
@@ -249,7 +260,7 @@ with tab1:
                 
                 conn.update(data=final_df)
                 st.balloons()
-                st.success("✅ 저장 완료! 전월세 실거래가가 완벽하게 매칭되었습니다.")
+                st.success("✅ 저장 완료! 전/월세 데이터가 완벽하게 업데이트되었습니다.")
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"저장 실패: {e}")
