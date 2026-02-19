@@ -20,8 +20,8 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Premium Ver.)")
-st.caption("서울+경기 핵심지 통합 분석: [층/건축년도 추가] + [실제 전월세 반영] + [AI 채팅 자문]")
+st.title("🏙️ AI 부동산 통합 솔루션 (Capital Area Ver.)")
+st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도 추가] + [실제 전월세 반영] + [AI 채팅 자문]")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -87,17 +87,32 @@ with st.sidebar:
     st.divider()
 
     st.header("🔍 데이터 자동 수집")
+    
+    # [핵심 변경] 서울 전역 및 경기 주요 도시 추가
     district_code = {
-        "서울 강남구": "11680", "서울 강동구": "11740", "서울 송파구": "11710",
-        "서울 서초구": "11650", "서울 마포구": "11440", "서울 용산구": "11170",
-        "경기 성남 분당": "41135", "경기 과천시": "41290"
+        # 서울 특별시 (25개 구 전역)
+        "서울 강남구": "11680", "서울 강동구": "11740", "서울 강북구": "11305", "서울 강서구": "11500", "서울 관악구": "11620",
+        "서울 광진구": "11215", "서울 구로구": "11530", "서울 금천구": "11545", "서울 노원구": "11350", "서울 도봉구": "11320",
+        "서울 동대문구": "11230", "서울 동작구": "11590", "서울 마포구": "11440", "서울 서대문구": "11410", "서울 서초구": "11650",
+        "서울 성동구": "11200", "서울 성북구": "11290", "서울 송파구": "11710", "서울 양천구": "11470", "서울 영등포구": "11560",
+        "서울 용산구": "11170", "서울 은평구": "11380", "서울 종로구": "11110", "서울 중구": "11140", "서울 중랑구": "11260",
+
+        # 경기도 주요 핵심 도시
+        "경기 과천시": "41290", "경기 광명시": "41210", "경기 하남시": "41450", 
+        "경기 성남 분당": "41135", "경기 성남 수정": "41131", "경기 성남 중원": "41133",
+        "경기 안양 동안": "41173", "경기 안양 만안": "41171",
+        "경기 수원 영통": "41117", "경기 수원 팔달": "41115",
+        "경기 용인 수지": "41465", "경기 용인 기흥": "41463",
+        "경기 고양 일산동": "41285", "경기 고양 일산서": "41287", "경기 고양 덕양": "41281",
+        "경기 화성시": "41590", "경기 김포시": "41570", "경기 남양주시": "41360",
+        "경기 구리시": "41310", "경기 부천시": "41190", "경기 군포시": "41410", "경기 의왕시": "41430"
     }
     district_options = ["전체 지역 (목록 전체)"] + sorted(list(district_code.keys()))
     selected_option = st.selectbox("수집할 지역(구)", district_options)
     
     if st.button("📥 실거래가 싹 가져오기 (매매+전월세)"):
         target_districts = district_code if selected_option == "전체 지역 (목록 전체)" else {selected_option: district_code[selected_option]}
-        progress_bar = st.progress(0, text="정부 서버 연결 중...")
+        progress_bar = st.progress(0, text="정부 서버 연결 중... (전체 지역 선택 시 시간이 소요됩니다)")
         
         df_trade_list = []
         df_rent_list = []
@@ -201,7 +216,6 @@ with tab1:
 
                 cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '전고점(억)', '입지점수']
                 
-                # 안전장치: 현재 시트에 '층'과 '건축년도'가 없으면 강제로 추가해줌
                 if not df_current.empty:
                     if '층' not in df_current.columns: df_current['층'] = "-"
                     if '건축년도' not in df_current.columns: df_current['건축년도'] = "-"
@@ -220,7 +234,7 @@ with tab1:
                 
                 conn.update(data=final_df)
                 st.balloons()
-                st.success("✅ 저장 완료! 새로운 데이터 구조(층, 건축년도 포함)로 시트가 업데이트되었습니다.")
+                st.success("✅ 저장 완료! 수도권 전체 데이터가 업데이트되었습니다.")
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"저장 실패: {e}")
@@ -231,7 +245,6 @@ with tab2:
     try:
         df_sheet = conn.read(ttl=0)
         
-        # 안전장치: 시트에 데이터가 존재하지만 '층', '건축년도'가 누락된 과거 데이터라면 임시로 채워줌
         if not df_sheet.empty and '매매가(억)' in df_sheet.columns:
             if '층' not in df_sheet.columns: df_sheet['층'] = "-"
             if '건축년도' not in df_sheet.columns: df_sheet['건축년도'] = "-"
