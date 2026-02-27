@@ -109,7 +109,7 @@ with st.sidebar:
     
     with st.expander("💸 자산 및 소득 (클릭)", expanded=True):
         user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
-        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=8.0, step=0.5)
+        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
     # [새로운 기능] 청약 맞춤형 자격 조건 추가!
@@ -516,3 +516,4 @@ with tab3:
             st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
         else:
             st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 활용 신청을 확인해주세요.")
+
