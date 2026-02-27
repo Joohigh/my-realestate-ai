@@ -20,12 +20,12 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Capital Area Ver.)")
-st.caption("서울 전역 + 경기 핵심지 통합 분석: [층/건축년도/날짜] + [전/월세 완벽 분리 연동] + [AI 채팅 자문]")
+st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver.)")
+st.caption("실거래가 정밀 분석 + AI 자문 + 🌟 [NEW] 서울 청약 일정 실시간 조회")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
-# [함수] 정부 서버 직접 접속 (매매 & 전월세)
+# [함수] 정부 서버 직접 접속 (매매 & 전월세 & 청약)
 # --------------------------------------------------------------------------
 def fetch_trade_data(lawd_cd, deal_ymd, service_key):
     url = "http://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
@@ -74,6 +74,43 @@ def fetch_rent_data(lawd_cd, deal_ymd, service_key):
     except: return None
     return None
 
+def fetch_applyhome_data(service_key):
+    """청약홈 실시간 분양(청약) 정보 수집 함수"""
+    url = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail"
+    params = {
+        "page": 1,
+        "perPage": 100,
+        "serviceKey": service_key
+    }
+    try:
+        # 공공데이터 API 호출
+        response = requests.get(url, params=params, verify=False, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data:
+                df = pd.DataFrame(data["data"])
+                if not df.empty:
+                    # 서울 지역만 필터링 (명칭에 '서울'이 포함된 경우)
+                    df_seoul = df[df['SUBSCRPT_AREA_CODE_NM'].astype(str).str.contains('서울', na=False)]
+                    if df_seoul.empty:
+                        return pd.DataFrame()
+                        
+                    res_df = pd.DataFrame()
+                    res_df['아파트명(청약단지)'] = df_seoul['HOUSE_NM']
+                    res_df['지역(공급위치)'] = df_seoul['HSSPLY_ADRES']
+                    res_df['공급규모(세대)'] = df_seoul['TOT_SUPLY_HSHLDCO']
+                    res_df['모집공고일'] = df_seoul['RCRIT_PBLANC_DE']
+                    res_df['청약시작일'] = df_seoul['RCEPT_BGNDE']
+                    res_df['청약종료일'] = df_seoul['RCEPT_ENDDE']
+                    res_df['당첨자발표일'] = df_seoul['PRZWNER_PRESNATN_DE']
+                    
+                    # 최신 공고일 순으로 정렬
+                    res_df = res_df.sort_values('모집공고일', ascending=False)
+                    return res_df
+    except Exception as e:
+        return None
+    return pd.DataFrame()
+
 # --------------------------------------------------------------------------
 # [2] 사이드바
 # --------------------------------------------------------------------------
@@ -81,13 +118,12 @@ with st.sidebar:
     st.header("💰 내 재정 상황 (Private)")
     with st.expander("💸 자산 및 소득 입력 (클릭)", expanded=True):
         user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
-        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
+        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=8.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
     st.divider()
 
-    st.header("🔍 데이터 자동 수집")
-    
+    st.header("🔍 실거래가 자동 수집")
     district_code = {
         "서울 강남구": "11680", "서울 강동구": "11740", "서울 강북구": "11305", "서울 강서구": "11500", "서울 관악구": "11620",
         "서울 광진구": "11215", "서울 구로구": "11530", "서울 금천구": "11545", "서울 노원구": "11350", "서울 도봉구": "11320",
@@ -106,20 +142,14 @@ with st.sidebar:
     district_options = ["전체 지역 (목록 전체)"] + sorted(list(district_code.keys()))
     selected_option = st.selectbox("수집할 지역(구)", district_options)
     
-    if st.button("📥 실거래가 싹 가져오기 (매매+전월세)"):
+    if st.button("📥 실거래가 싹 가져오기"):
         target_districts = district_code if selected_option == "전체 지역 (목록 전체)" else {selected_option: district_code[selected_option]}
-        progress_bar = st.progress(0, text="정부 서버 연결 중... (전체 지역 선택 시 시간이 소요됩니다)")
+        progress_bar = st.progress(0, text="정부 서버 연결 중...")
         
         df_trade_list = []
         df_rent_list = []
         now = datetime.now()
-        
-        # 🚀 변경: 최근 6개월치 수집으로 확장!
-        months = []
-        temp_date = now
-        for _ in range(6): # 6개월치 (원하면 12로 늘려도 됩니다)
-            months.append(temp_date.strftime("%Y%m"))
-            temp_date = temp_date.replace(day=1) - timedelta(days=1)
+        months = [now.strftime("%Y%m"), (now.replace(day=1) - timedelta(days=1)).strftime("%Y%m")]
         
         total = len(target_districts) * len(months) * 2
         step = 0
@@ -170,9 +200,8 @@ with st.sidebar:
                 df_all_rent['조인키_아파트'] = df_all_rent['아파트'].astype(str).str.replace(' ', '')
                 df_all_rent['조인키_평형'] = df_all_rent['평형'].apply(lambda x: round(x))
                 
-                # [핵심 버그 수정] 전세와 월세를 분리해서 각각 평균 계산
-                df_jeonse = df_all_rent[df_all_rent['월세(만)'] == 0] # 월세가 없는 순수 전세
-                df_monthly = df_all_rent[df_all_rent['월세(만)'] > 0] # 월세가 있는 반전세/월세
+                df_jeonse = df_all_rent[df_all_rent['월세(만)'] == 0]
+                df_monthly = df_all_rent[df_all_rent['월세(만)'] > 0]
                 
                 jeonse_avg = df_jeonse.groupby(['조인키_아파트', '조인키_평형'])['보증금(억)'].mean().reset_index()
                 jeonse_avg.rename(columns={'보증금(억)': '평균전세가(억)'}, inplace=True)
@@ -180,11 +209,9 @@ with st.sidebar:
                 monthly_avg = df_monthly.groupby(['조인키_아파트', '조인키_평형'])[['보증금(억)', '월세(만)']].mean().reset_index()
                 monthly_avg.rename(columns={'보증금(억)': '평균월세보증금(억)', '월세(만)': '평균월세액(만)'}, inplace=True)
                 
-                # 매매 데이터에 전세와 월세 데이터를 각각 붙여넣기
                 df_clean = pd.merge(df_clean, jeonse_avg, how='left', on=['조인키_아파트', '조인키_평형'])
                 df_clean = pd.merge(df_clean, monthly_avg, how='left', on=['조인키_아파트', '조인키_평형'])
                 
-                # 병합된 데이터를 최종 컬럼명으로 정리
                 df_clean['전세가(억)'] = df_clean['평균전세가(억)'].fillna(df_clean['매매가(억)'] * 0.6)
                 df_clean['월세보증금(억)'] = df_clean['평균월세보증금(억)'].fillna(0)
                 df_clean['월세액(만원)'] = df_clean['평균월세액(만)'].fillna(0)
@@ -199,14 +226,14 @@ with st.sidebar:
             
             cols_to_keep = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
             st.session_state['fetched_data'] = df_clean[cols_to_keep]
-            st.success(f"✅ 총 {len(df_clean)}건 수집 완료! (전세와 월세가 완벽하게 분리되었습니다!)")
+            st.success(f"✅ 총 {len(df_clean)}건 수집 완료!")
         else:
             st.warning("⚠️ 수집된 데이터가 없습니다.")
 
 # --------------------------------------------------------------------------
-# [3] 메인 화면
+# [3] 메인 화면 (3개 탭으로 구성)
 # --------------------------------------------------------------------------
-tab1, tab2 = st.tabs(["📥 데이터 확인 및 저장", "🏆 랭킹 & 💬 AI 자문"])
+tab1, tab2, tab3 = st.tabs(["📥 실거래가 저장", "🏆 랭킹 & 💬 AI 자문", "📅 서울 청약 추천 (NEW)"])
 
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -215,7 +242,7 @@ except:
 
 # --- TAB 1: 데이터 저장 ---
 with tab1:
-    st.subheader("📡 실시간 시세 (매매+전세)")
+    st.subheader("📡 실시간 실거래 시세 (매매+전세)")
     if 'fetched_data' in st.session_state:
         df_new = st.session_state['fetched_data']
         search_apt = st.text_input("아파트 검색", placeholder="예: 래미안")
@@ -251,13 +278,9 @@ with tab1:
                         key = f"{str(row['아파트명']).replace(' ', '').strip()}_{row['평형']}"
                         if key in current_dict:
                             current_dict[key].update({
-                                '매매가(억)': row['매매가(억)'], 
-                                '층': row['층'], 
-                                '건축년도': row['건축년도'], 
-                                '전세가(억)': row['전세가(억)'],
-                                '월세보증금(억)': row['월세보증금(억)'],
-                                '월세액(만원)': row['월세액(만원)'],
-                                '거래일': row['거래일']
+                                '매매가(억)': row['매매가(억)'], '층': row['층'], '건축년도': row['건축년도'], 
+                                '전세가(억)': row['전세가(억)'], '월세보증금(억)': row['월세보증금(억)'],
+                                '월세액(만원)': row['월세액(만원)'], '거래일': row['거래일']
                             })
                             if row['전고점(억)'] > 0: current_dict[key]['전고점(억)'] = row['전고점(억)']
                             if row['입지점수'] > 0: current_dict[key]['입지점수'] = row['입지점수']
@@ -266,7 +289,7 @@ with tab1:
                 
                 conn.update(data=final_df)
                 st.balloons()
-                st.success("✅ 저장 완료! 전/월세 데이터가 완벽하게 업데이트되었습니다.")
+                st.success("✅ 저장 완료! 데이터가 시트에 업데이트되었습니다.")
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"저장 실패: {e}")
@@ -337,19 +360,10 @@ with tab2:
             st.header("💬 AI 부동산 투자 자문 (Chat)")
             st.info("위 리스트에서 관심 있는 아파트를 발견하셨나요? 지역이나 아파트명을 검색해 AI와 상담해보세요.")
 
-            # [핵심 수정] 동명이인 아파트를 구별하기 위한 '고유 선택키' 만들기
-            # 예: "서울 강남구 대치동 은마아파트 (1979년식, 31.0평)"
             df_sheet['선택키'] = df_sheet['지역'] + " " + df_sheet['아파트명'] + " (" + df_sheet['건축년도'].astype(str) + "년식, " + df_sheet['평형'].astype(str) + "평)"
-            
-            # 선택키 리스트를 만들고 정렬
             apt_list = sorted(df_sheet['선택키'].dropna().unique().tolist())
             
-            selected_key = st.selectbox(
-                "상담할 매물 검색 (지역, 아파트명, 평형 등으로 검색 가능)", 
-                apt_list, 
-                index=None, 
-                placeholder="예: 강남구 은마, 혹은 분당구 무지개..."
-            )
+            selected_key = st.selectbox("상담할 매물 검색", apt_list, index=None, placeholder="예: 강남구 은마...")
             
             if 'last_selected_apt' not in st.session_state: st.session_state['last_selected_apt'] = None
             if selected_key != st.session_state['last_selected_apt']:
@@ -358,7 +372,6 @@ with tab2:
                 st.session_state['context_prompt'] = ""
 
             if selected_key:
-                # 이름이 아닌 '선택키'로 정확한 해당 아파트 데이터만 콕 집어서 가져오기
                 target = df_sheet[df_sheet['선택키'] == selected_key].iloc[0]
                 
                 c1, c2, c3, c4 = st.columns(4)
@@ -392,7 +405,7 @@ with tab2:
                 for msg in st.session_state.get('messages', []):
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
-                if prompt := st.chat_input("질문을 입력하세요 (예: 1층인데 나중에 팔기 어려울까? 전세가율이 안전한 편이야?)"):
+                if prompt := st.chat_input("질문을 입력하세요 (예: 1층인데 나중에 팔기 어려울까?)"):
                     with st.chat_message("user"): st.markdown(prompt)
                     st.session_state['messages'].append({"role": "user", "content": prompt})
                     
@@ -408,7 +421,28 @@ with tab2:
                             message_placeholder.markdown(response.text)
                             st.session_state['messages'].append({"role": "assistant", "content": response.text})
                         except Exception as e: message_placeholder.error(f"오류: {e}")
-            else: st.info("👆 분석할 아파트를 선택해주세요.")
+            else: st.info("👆 분석할 매물을 선택해주세요.")
                 
-        else: st.warning("데이터가 없습니다. [데이터 확인 및 저장] 탭에서 데이터를 수집해주세요.")
+        else: st.warning("데이터가 없습니다. [📥 실거래가 저장] 탭에서 데이터를 수집해주세요.")
     except Exception as e: st.error(f"오류: {e}")
+
+# --- TAB 3: 서울 청약 일정 (NEW) ---
+with tab3:
+    st.header("📅 서울 아파트 청약 (분양) 추천 일정")
+    st.info("💡 공공데이터포털의 '한국부동산원 청약홈' API를 연동하여 모집공고가 뜬 최신 청약 단지 정보를 제공합니다.")
+    
+    # 솔직한 제약사항 안내 (분양가 관련)
+    st.caption("※ 참고: 정부 API 정책상 정확한 주택형별 '분양가(청약호가)'는 이 기본 공고 API에 노출되지 않으며, 상세 내역은 청약홈 홈페이지에서 확인하셔야 합니다.")
+    
+    if st.button("🔄 최신 서울 청약 일정 불러오기", type="primary"):
+        with st.spinner("청약홈 서버에서 서울 지역 공고를 가져오는 중입니다..."):
+            df_apply = fetch_applyhome_data(api_key_decoded)
+            
+            if df_apply is not None and not df_apply.empty:
+                st.success(f"✅ 총 {len(df_apply)}건의 진행/예정 중인 서울 청약 공고를 찾았습니다!")
+                # 데이터 프레임 출력 시 인덱스 숨기고 폭 맞춤
+                st.dataframe(df_apply, use_container_width=True, hide_index=True)
+            elif df_apply is not None and df_apply.empty:
+                st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
+            else:
+                st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 '한국부동산원_청약홈 아파트 분양정보 상세조회 서비스' 활용 신청을 완료했는지 확인해주세요!")
