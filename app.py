@@ -21,7 +21,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver.)")
-st.caption("실거래가 정밀 분석 + AI 자문 + 🌟 [NEW] 서울 청약 일정 실시간 조회")
+st.caption("실거래가 정밀 분석 + AI 자문 + 🌟 [NEW] 맞춤형 청약 컨설팅 & 챗봇")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -75,25 +75,17 @@ def fetch_rent_data(lawd_cd, deal_ymd, service_key):
     return None
 
 def fetch_applyhome_data(service_key):
-    """청약홈 실시간 분양(청약) 정보 수집 함수"""
     url = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail"
-    params = {
-        "page": 1,
-        "perPage": 100,
-        "serviceKey": service_key
-    }
+    params = {"page": 1, "perPage": 100, "serviceKey": service_key}
     try:
-        # 공공데이터 API 호출
         response = requests.get(url, params=params, verify=False, timeout=10)
         if response.status_code == 200:
             data = response.json()
             if "data" in data:
                 df = pd.DataFrame(data["data"])
                 if not df.empty:
-                    # 서울 지역만 필터링 (명칭에 '서울'이 포함된 경우)
                     df_seoul = df[df['SUBSCRPT_AREA_CODE_NM'].astype(str).str.contains('서울', na=False)]
-                    if df_seoul.empty:
-                        return pd.DataFrame()
+                    if df_seoul.empty: return pd.DataFrame()
                         
                     res_df = pd.DataFrame()
                     res_df['아파트명(청약단지)'] = df_seoul['HOUSE_NM']
@@ -104,23 +96,31 @@ def fetch_applyhome_data(service_key):
                     res_df['청약종료일'] = df_seoul['RCEPT_ENDDE']
                     res_df['당첨자발표일'] = df_seoul['PRZWNER_PRESNATN_DE']
                     
-                    # 최신 공고일 순으로 정렬
                     res_df = res_df.sort_values('모집공고일', ascending=False)
                     return res_df
-    except Exception as e:
-        return None
+    except: return None
     return pd.DataFrame()
 
 # --------------------------------------------------------------------------
 # [2] 사이드바
 # --------------------------------------------------------------------------
 with st.sidebar:
-    st.header("💰 내 재정 상황 (Private)")
-    with st.expander("💸 자산 및 소득 입력 (클릭)", expanded=True):
+    st.header("💰 내 재정 및 청약 조건")
+    
+    with st.expander("💸 자산 및 소득 (클릭)", expanded=True):
         user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
-        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
+        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=8.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
+    # [새로운 기능] 청약 맞춤형 자격 조건 추가!
+    with st.expander("📝 청약 가점 및 특별공급 조건 (클릭)", expanded=True):
+        is_homeless = st.checkbox("무주택자", value=True)
+        homeless_years = st.number_input("무주택 기간 (년)", 0, 30, 5)
+        is_newlywed = st.checkbox("신혼부부 (혼인기간 7년 이내)", value=False)
+        is_first_time = st.checkbox("생애최초 (세대원 전원 주택소유 이력 없음)", value=False)
+        children_count = st.number_input("미성년 자녀 수 (명)", 0, 10, 0)
+        sub_account_years = st.number_input("청약통장 가입기간 (년)", 0, 30, 5)
+
     st.divider()
 
     st.header("🔍 실거래가 자동 수집")
@@ -233,7 +233,7 @@ with st.sidebar:
 # --------------------------------------------------------------------------
 # [3] 메인 화면 (3개 탭으로 구성)
 # --------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(["📥 실거래가 저장", "🏆 랭킹 & 💬 AI 자문", "📅 서울 청약 추천 (NEW)"])
+tab1, tab2, tab3 = st.tabs(["📥 실거래가 저장", "🏆 랭킹 & 💬 매매 자문", "📅 서울 청약 & 💬 청약 자문"])
 
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -295,7 +295,7 @@ with tab1:
             except Exception as e: st.error(f"저장 실패: {e}")
     else: st.info("👈 왼쪽 사이드바에서 [실거래가 가져오기] 버튼을 눌러주세요.")
 
-# --- TAB 2: 통합 분석 (랭킹 + AI 대화) ---
+# --- TAB 2: 매매 분석 (랭킹 + AI 대화) ---
 with tab2:
     try:
         df_sheet = conn.read(ttl=0)
@@ -304,7 +304,7 @@ with tab2:
             for c in ['층', '건축년도']:
                 if c not in df_sheet.columns: df_sheet[c] = "-"
 
-            st.header("🏆 AI 추천 랭킹 (Ranking)")
+            st.header("🏆 AI 추천 랭킹 (매매/전세)")
             
             df_rank = df_sheet.copy()
             df_rank['하락률(%)'] = df_rank.apply(lambda x: ((x['전고점(억)'] - x['매매가(억)']) / x['전고점(억)'] * 100) if x.get('전고점(억)', 0) > 0 else 0, axis=1)
@@ -357,19 +357,19 @@ with tab2:
 
             st.divider()
 
-            st.header("💬 AI 부동산 투자 자문 (Chat)")
-            st.info("위 리스트에서 관심 있는 아파트를 발견하셨나요? 지역이나 아파트명을 검색해 AI와 상담해보세요.")
+            st.header("💬 AI 매매/갭투자 자문 (Chat)")
+            st.info("위 리스트에서 관심 있는 아파트를 검색해 AI와 상담해보세요.")
 
             df_sheet['선택키'] = df_sheet['지역'] + " " + df_sheet['아파트명'] + " (" + df_sheet['건축년도'].astype(str) + "년식, " + df_sheet['평형'].astype(str) + "평)"
             apt_list = sorted(df_sheet['선택키'].dropna().unique().tolist())
             
             selected_key = st.selectbox("상담할 매물 검색", apt_list, index=None, placeholder="예: 강남구 은마...")
             
-            if 'last_selected_apt' not in st.session_state: st.session_state['last_selected_apt'] = None
-            if selected_key != st.session_state['last_selected_apt']:
-                st.session_state['messages'] = []
-                st.session_state['last_selected_apt'] = selected_key
-                st.session_state['context_prompt'] = ""
+            if 'last_selected_apt_tab2' not in st.session_state: st.session_state['last_selected_apt_tab2'] = None
+            if selected_key != st.session_state['last_selected_apt_tab2']:
+                st.session_state['messages_tab2'] = []
+                st.session_state['last_selected_apt_tab2'] = selected_key
+                st.session_state['context_prompt_tab2'] = ""
 
             if selected_key:
                 target = df_sheet[df_sheet['선택키'] == selected_key].iloc[0]
@@ -380,7 +380,7 @@ with tab2:
                 c3.metric("실제 전세가", f"{target['전세가(억)']:.2f}억")
                 c4.metric("입지점수", f"{target.get('입지점수', 0)}점")
 
-                if st.button("🚀 AI 심층 분석 & 채팅 시작", type="primary"):
+                if st.button("🚀 매매 심층 분석 시작", type="primary"):
                     loan_needed = target['매매가(억)'] - user_cash
                     dsr_rough = (loan_needed * (target_loan_rate / 100)) / (user_income/10) * 100 if user_income > 0 else 0
                     
@@ -390,60 +390,129 @@ with tab2:
                     [가격] 최근 매매가 {target['매매가(억)']}억, 최근 평균 전세가 {target['전세가(억)']:.2f}억, 전고점 {target.get('전고점(억)', 0)}억
                     [재정] 현금 {user_cash}억, 연소득 {user_income}천만, 금리 {target_loan_rate}%, 예상 DSR {dsr_rough:.1f}%
                     
-                    먼저 이 매물의 가격 적정성, '층'과 '건축년도'를 고려한 투자/실거주 적합성, 그리고 진짜 전세가를 기반으로 한 자금 여력을 종합 분석해줘.
+                    먼저 이 매물의 가격 적정성, '층'과 '건축년도'를 고려한 투자/실거주 적합성, 자금 여력을 종합 분석해줘.
                     """
-                    st.session_state['context_prompt'] = system_prompt
+                    st.session_state['context_prompt_tab2'] = system_prompt
                     
                     with st.spinner("AI가 입체적으로 분석 중입니다..."):
                         try:
                             model = genai.GenerativeModel('gemini-flash-latest')
                             response = model.generate_content(system_prompt)
-                            st.session_state['messages'].append({"role": "assistant", "content": response.text})
+                            st.session_state['messages_tab2'].append({"role": "assistant", "content": response.text})
                             st.rerun()
                         except Exception as e: st.error(f"AI 호출 오류: {e}")
 
-                for msg in st.session_state.get('messages', []):
+                for msg in st.session_state.get('messages_tab2', []):
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
-                if prompt := st.chat_input("질문을 입력하세요 (예: 1층인데 나중에 팔기 어려울까?)"):
+                if prompt := st.chat_input("매매/갭투자 관련 질문을 입력하세요 (예: 1층인데 나중에 팔기 어려울까?)"):
                     with st.chat_message("user"): st.markdown(prompt)
-                    st.session_state['messages'].append({"role": "user", "content": prompt})
+                    st.session_state['messages_tab2'].append({"role": "user", "content": prompt})
                     
                     with st.chat_message("assistant"):
                         message_placeholder = st.empty()
                         try:
                             model = genai.GenerativeModel('gemini-flash-latest')
-                            if 'context_prompt' in st.session_state and st.session_state['context_prompt']:
-                                final_prompt = f"{st.session_state['context_prompt']}\n\n[이전 대화 기억]\n사용자 질문: {prompt}"
+                            if 'context_prompt_tab2' in st.session_state and st.session_state['context_prompt_tab2']:
+                                final_prompt = f"{st.session_state['context_prompt_tab2']}\n\n[이전 대화 기억]\n사용자 질문: {prompt}"
                             else: final_prompt = prompt
                             
                             response = model.generate_content(final_prompt)
                             message_placeholder.markdown(response.text)
-                            st.session_state['messages'].append({"role": "assistant", "content": response.text})
+                            st.session_state['messages_tab2'].append({"role": "assistant", "content": response.text})
                         except Exception as e: message_placeholder.error(f"오류: {e}")
             else: st.info("👆 분석할 매물을 선택해주세요.")
                 
         else: st.warning("데이터가 없습니다. [📥 실거래가 저장] 탭에서 데이터를 수집해주세요.")
     except Exception as e: st.error(f"오류: {e}")
 
-# --- TAB 3: 서울 청약 일정 (NEW) ---
+# --- TAB 3: 서울 청약 일정 및 자문 (NEW) ---
 with tab3:
-    st.header("📅 서울 아파트 청약 (분양) 추천 일정")
-    st.info("💡 공공데이터포털의 '한국부동산원 청약홈' API를 연동하여 모집공고가 뜬 최신 청약 단지 정보를 제공합니다.")
-    
-    # 솔직한 제약사항 안내 (분양가 관련)
-    st.caption("※ 참고: 정부 API 정책상 정확한 주택형별 '분양가(청약호가)'는 이 기본 공고 API에 노출되지 않으며, 상세 내역은 청약홈 홈페이지에서 확인하셔야 합니다.")
+    st.header("📅 서울 아파트 청약 (분양) 추천 및 컨설팅")
+    st.info("💡 공공데이터포털 연동: 실시간 청약 공고 조회 및 내 가점/재정에 맞춘 전략 컨설팅")
+    st.caption("※ 참고: 정부 API 정책상 정확한 주택형별 '분양가'는 노출되지 않으며, 상세 내역은 청약홈 홈페이지에서 확인하셔야 합니다.")
     
     if st.button("🔄 최신 서울 청약 일정 불러오기", type="primary"):
         with st.spinner("청약홈 서버에서 서울 지역 공고를 가져오는 중입니다..."):
             df_apply = fetch_applyhome_data(api_key_decoded)
+            st.session_state['apply_data'] = df_apply
+            # 새로운 청약을 불러오면 기존 채팅 내역 초기화
+            st.session_state['messages_tab3'] = []
             
-            if df_apply is not None and not df_apply.empty:
-                st.success(f"✅ 총 {len(df_apply)}건의 진행/예정 중인 서울 청약 공고를 찾았습니다!")
-                # 데이터 프레임 출력 시 인덱스 숨기고 폭 맞춤
-                st.dataframe(df_apply, use_container_width=True, hide_index=True)
-            elif df_apply is not None and df_apply.empty:
-                st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
-            else:
-                st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 '한국부동산원_청약홈 아파트 분양정보 상세조회 서비스' 활용 신청을 완료했는지 확인해주세요!")
+    if 'apply_data' in st.session_state:
+        df_apply = st.session_state['apply_data']
+        
+        if df_apply is not None and not df_apply.empty:
+            st.success(f"✅ 총 {len(df_apply)}건의 진행/예정 중인 서울 청약 공고를 찾았습니다!")
+            st.dataframe(df_apply, use_container_width=True, hide_index=True)
+            
+            st.divider()
+            
+            st.subheader("🤖 AI 청약 맞춤형 분석 및 전략 추천")
+            st.write("사이드바에 설정된 **재정 상황 및 청약 가점 조건**을 바탕으로 나만의 최적 청약 전략을 분석해 드립니다.")
+            
+            if 'messages_tab3' not in st.session_state: st.session_state['messages_tab3'] = []
 
+            if st.button("✨ 내 조건에 맞는 단지 추천 및 자문 시작", type="primary"):
+                apply_summary = df_apply[['아파트명(청약단지)', '지역(공급위치)', '공급규모(세대)', '청약시작일']].to_string(index=False)
+                
+                homeless_str = f"무주택 {homeless_years}년" if is_homeless else "유주택자"
+                newlywed_str = "신혼부부(O)" if is_newlywed else "신혼부부(X)"
+                first_time_str = "생애최초(O)" if is_first_time else "생애최초(X)"
+                
+                system_prompt_tab3 = f"""
+                너는 대한민국의 최고 부동산 청약 및 특별공급 전문가야.
+                
+                [현재 청약 공고 리스트]
+                {apply_summary}
+                
+                [사용자 재정 및 청약 스펙]
+                - 자본: 현금 {user_cash}억 원 / 연소득 {user_income}천만 원 / 대출금리 {target_loan_rate}%
+                - 주택소유: {homeless_str}
+                - 특공조건: {newlywed_str} / {first_time_str} / 미성년 자녀 수 {children_count}명
+                - 청약통장: 가입기간 {sub_account_years}년
+                
+                위 정보를 바탕으로 아래 리포트를 작성하고, 이후 사용자의 질문에 답해줘:
+                1. **맞춤형 전략 추천**: 사용자의 신혼/다자녀/무주택 조건에 비추어 볼 때 가점제, 추첨제, 혹은 특정 특별공급(신혼/다자녀/생애최초 등) 중 어느 전형으로 넣는 것이 당첨 확률이 가장 높은지 구체적으로 조언해줘.
+                2. **추천 단지 BEST 1~2곳**: 위 리스트 중에서 사용자의 당첨 가능성과 투자 가치가 가장 높은 단지를 짚어줘.
+                3. **자금 조달 시나리오**: 계약금-중도금-잔금 스케줄을 가정하여, 현재 현금({user_cash}억)과 연소득({user_income}천만)으로 무리 없이 분양을 받을 수 있는지 자금 흐름을 시뮬레이션해줘.
+                """
+                st.session_state['context_prompt_tab3'] = system_prompt_tab3
+                
+                with st.spinner("AI가 청약 자격(가점/특공)과 자금 조달 시나리오를 정밀 분석 중입니다..."):
+                    try:
+                        model = genai.GenerativeModel('gemini-flash-latest')
+                        response = model.generate_content(system_prompt_tab3)
+                        st.session_state['messages_tab3'] = [{"role": "assistant", "content": response.text}]
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"AI 호출 오류: {e}")
+
+            # 채팅 히스토리 출력
+            for msg in st.session_state.get('messages_tab3', []):
+                with st.chat_message(msg['role']): st.markdown(msg['content'])
+
+            # 사용자의 후속 질문 입력기
+            if prompt := st.chat_input("청약 전략, 대출, 특별공급 자격 등에 대해 자유롭게 질문하세요!"):
+                with st.chat_message("user"): st.markdown(prompt)
+                st.session_state['messages_tab3'].append({"role": "user", "content": prompt})
+                
+                with st.chat_message("assistant"):
+                    message_placeholder = st.empty()
+                    try:
+                        model = genai.GenerativeModel('gemini-flash-latest')
+                        if 'context_prompt_tab3' in st.session_state and st.session_state['context_prompt_tab3']:
+                            final_prompt = f"{st.session_state['context_prompt_tab3']}\n\n[이전 대화 기억]\n사용자 질문: {prompt}"
+                        else:
+                            final_prompt = prompt
+                        
+                        response = model.generate_content(final_prompt)
+                        message_placeholder.markdown(response.text)
+                        st.session_state['messages_tab3'].append({"role": "assistant", "content": response.text})
+                    except Exception as e:
+                        message_placeholder.error(f"오류: {e}")
+                        
+        elif df_apply is not None and df_apply.empty:
+            st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
+        else:
+            st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 활용 신청을 확인해주세요.")
