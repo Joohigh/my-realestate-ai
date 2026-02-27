@@ -118,7 +118,7 @@ with st.sidebar:
     st.header("💰 내 재정 상황 (Private)")
     with st.expander("💸 자산 및 소득 입력 (클릭)", expanded=True):
         user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
-        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=8.0, step=0.5)
+        user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
     st.divider()
@@ -446,3 +446,4 @@ with tab3:
                 st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
             else:
                 st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 '한국부동산원_청약홈 아파트 분양정보 상세조회 서비스' 활용 신청을 완료했는지 확인해주세요!")
+
