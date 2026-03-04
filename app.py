@@ -112,7 +112,6 @@ with st.sidebar:
         user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=5.0, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
         
-    # [새로운 기능] 청약 맞춤형 자격 조건 추가!
     with st.expander("📝 청약 가점 및 특별공급 조건 (클릭)", expanded=True):
         is_homeless = st.checkbox("무주택자", value=True)
         homeless_years = st.number_input("무주택 기간 (년)", 0, 30, 5)
@@ -313,14 +312,14 @@ with tab2:
             with st.expander("🕵️‍♂️ 조건 설정 (필터 펼치기)", expanded=True):
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.write("📐 **평형 선택**")
+                    st.write("📐 평형 선택")
                     pyung_range = st.slider("원하는 평수", 10, 80, (20, 40), step=1)
                     exclude_small = st.checkbox("20평 미만 제외", value=True)
                 with c2:
-                    st.write("💰 **매매가 예산**")
+                    st.write("💰 매매가 예산")
                     price_max = st.slider("최대 매매가 (억)", 5, 50, 20)
                 with c3:
-                    st.write("💸 **투자/전세 조건**")
+                    st.write("💸 투자/전세 조건")
                     gap_max = st.slider("최대 갭 투자금 (억)", 1, 20, 10)
 
             df_filtered = df_rank[(df_rank['평형'] >= pyung_range[0]) & (df_rank['평형'] <= pyung_range[1])]
@@ -412,10 +411,17 @@ with tab2:
                     with st.chat_message("assistant"):
                         message_placeholder = st.empty()
                         try:
+                            # [핵심 버그 수정 적용 완료] - 이전 대화 내역 병합 로직
                             model = genai.GenerativeModel('gemini-flash-latest')
                             if 'context_prompt_tab2' in st.session_state and st.session_state['context_prompt_tab2']:
-                                final_prompt = f"{st.session_state['context_prompt_tab2']}\n\n[이전 대화 기억]\n사용자 질문: {prompt}"
-                            else: final_prompt = prompt
+                                history_text = ""
+                                for m in st.session_state['messages_tab2'][:-1]:
+                                    role_name = "사용자" if m['role'] == 'user' else "AI"
+                                    history_text += f"{role_name}: {m['content']}\n"
+                                
+                                final_prompt = f"{st.session_state['context_prompt_tab2']}\n\n[이전 대화 내역]\n{history_text}\n\n사용자 질문: {prompt}"
+                            else: 
+                                final_prompt = prompt
                             
                             response = model.generate_content(final_prompt)
                             message_placeholder.markdown(response.text)
@@ -449,7 +455,7 @@ with tab3:
             st.divider()
             
             st.subheader("🤖 AI 청약 맞춤형 분석 및 전략 추천")
-            st.write("사이드바에 설정된 **재정 상황 및 청약 가점 조건**을 바탕으로 나만의 최적 청약 전략을 분석해 드립니다.")
+            st.write("사이드바에 설정된 재정 상황 및 청약 가점 조건을 바탕으로 나만의 최적 청약 전략을 분석해 드립니다.")
             
             if 'messages_tab3' not in st.session_state: st.session_state['messages_tab3'] = []
 
@@ -473,9 +479,9 @@ with tab3:
                 - 청약통장: 가입기간 {sub_account_years}년
                 
                 위 정보를 바탕으로 아래 리포트를 작성하고, 이후 사용자의 질문에 답해줘:
-                1. **맞춤형 전략 추천**: 사용자의 신혼/다자녀/무주택 조건에 비추어 볼 때 가점제, 추첨제, 혹은 특정 특별공급(신혼/다자녀/생애최초 등) 중 어느 전형으로 넣는 것이 당첨 확률이 가장 높은지 구체적으로 조언해줘.
-                2. **추천 단지 BEST 1~2곳**: 위 리스트 중에서 사용자의 당첨 가능성과 투자 가치가 가장 높은 단지를 짚어줘.
-                3. **자금 조달 시나리오**: 계약금-중도금-잔금 스케줄을 가정하여, 현재 현금({user_cash}억)과 연소득({user_income}천만)으로 무리 없이 분양을 받을 수 있는지 자금 흐름을 시뮬레이션해줘.
+                1. 맞춤형 전략 추천: 사용자의 신혼/다자녀/무주택 조건에 비추어 볼 때 가점제, 추첨제, 혹은 특정 특별공급(신혼/다자녀/생애최초 등) 중 어느 전형으로 넣는 것이 당첨 확률이 가장 높은지 구체적으로 조언해줘.
+                2. 추천 단지 BEST 1~2곳: 위 리스트 중에서 사용자의 당첨 가능성과 투자 가치가 가장 높은 단지를 짚어줘.
+                3. 자금 조달 시나리오: 계약금-중도금-잔금 스케줄을 가정하여, 현재 현금({user_cash}억)과 연소득({user_income}천만)으로 무리 없이 분양을 받을 수 있는지 자금 흐름을 시뮬레이션해줘.
                 """
                 st.session_state['context_prompt_tab3'] = system_prompt_tab3
                 
@@ -500,9 +506,15 @@ with tab3:
                 with st.chat_message("assistant"):
                     message_placeholder = st.empty()
                     try:
+                        # [핵심 버그 수정 적용 완료] - 이전 대화 내역 병합 로직
                         model = genai.GenerativeModel('gemini-flash-latest')
                         if 'context_prompt_tab3' in st.session_state and st.session_state['context_prompt_tab3']:
-                            final_prompt = f"{st.session_state['context_prompt_tab3']}\n\n[이전 대화 기억]\n사용자 질문: {prompt}"
+                            history_text = ""
+                            for m in st.session_state['messages_tab3'][:-1]:
+                                role_name = "사용자" if m['role'] == 'user' else "AI"
+                                history_text += f"{role_name}: {m['content']}\n"
+                            
+                            final_prompt = f"{st.session_state['context_prompt_tab3']}\n\n[이전 대화 내역]\n{history_text}\n\n사용자 질문: {prompt}"
                         else:
                             final_prompt = prompt
                         
@@ -516,4 +528,3 @@ with tab3:
             st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
         else:
             st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 활용 신청을 확인해주세요.")
-
