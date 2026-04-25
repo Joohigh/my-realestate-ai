@@ -221,7 +221,13 @@ with st.sidebar:
 
     st.divider()
 
-    st.header("🔍 실거래가 자동 수집")
+    # =========================================================
+    # 🔍 실거래가 자동 수집 (배치 모드 - NEW)
+    # =========================================================
+    st.header("🔍 실거래가 자동 수집 (배치 모드)")
+    st.caption("⚠️ 한 번에 5개 구 이하 선택을 권장합니다. 다수 선택 시 정부 API 트래픽 제한으로 실패 가능성이 높아집니다.")
+
+    # 구 코드 매핑 (기존 그대로)
     district_code = {
         "서울 강남구": "11680", "서울 강동구": "11740", "서울 강북구": "11305", "서울 강서구": "11500", "서울 관악구": "11620",
         "서울 광진구": "11215", "서울 구로구": "11530", "서울 금천구": "11545", "서울 노원구": "11350", "서울 도봉구": "11320",
@@ -237,8 +243,59 @@ with st.sidebar:
         "경기 화성시": "41590", "경기 김포시": "41570", "경기 남양주시": "41360",
         "경기 구리시": "41310", "경기 부천시": "41190", "경기 군포시": "41410", "경기 의왕시": "41430"
     }
-    district_options = ["전체 지역 (목록 전체)"] + sorted(list(district_code.keys()))
-    selected_option = st.selectbox("수집할 지역(구)", district_options)
+
+    # 권역별 그룹
+    district_groups = {
+        "🏙️ 서울 강남권": ["서울 강남구", "서울 서초구", "서울 송파구", "서울 강동구"],
+        "🏛️ 서울 도심권": ["서울 종로구", "서울 중구", "서울 용산구", "서울 성동구", "서울 광진구"],
+        "🌳 서울 동북권": ["서울 강북구", "서울 노원구", "서울 도봉구", "서울 동대문구", "서울 성북구", "서울 중랑구"],
+        "🌉 서울 서남권": ["서울 강서구", "서울 관악구", "서울 구로구", "서울 금천구", "서울 동작구", "서울 영등포구", "서울 양천구"],
+        "🌲 서울 서북권": ["서울 마포구", "서울 서대문구", "서울 은평구"],
+        "🏞️ 경기 1기 신도시": ["경기 성남 분당", "경기 고양 일산동", "경기 고양 일산서", "경기 안양 동안", "경기 부천시", "경기 군포시"],
+        "🏗️ 경기 2기/3기": ["경기 과천시", "경기 광명시", "경기 하남시", "경기 화성시", "경기 김포시", "경기 남양주시"],
+        "🌆 경기 기타": ["경기 성남 수정", "경기 성남 중원", "경기 안양 만안", "경기 수원 영통", "경기 수원 팔달",
+                      "경기 용인 수지", "경기 용인 기흥", "경기 고양 덕양", "경기 구리시", "경기 의왕시"],
+    }
+
+    if 'selected_districts' not in st.session_state:
+        st.session_state['selected_districts'] = []
+    if 'failed_districts' not in st.session_state:
+        st.session_state['failed_districts'] = []
+
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("✅ 모두 해제", use_container_width=True):
+            st.session_state['selected_districts'] = []
+            st.rerun()
+    with col_btn2:
+        if st.button("🎯 강남4구만", use_container_width=True):
+            st.session_state['selected_districts'] = ["서울 강남구", "서울 서초구", "서울 송파구", "서울 강동구"]
+            st.rerun()
+
+    selected = []
+    for group_name, districts in district_groups.items():
+        with st.expander(group_name, expanded=False):
+            for d in districts:
+                checked = d in st.session_state['selected_districts']
+                if st.checkbox(d, value=checked, key=f"chk_{d}"):
+                    selected.append(d)
+
+    st.session_state['selected_districts'] = selected
+
+    sel_count = len(selected)
+    if sel_count == 0:
+        st.warning("⚠️ 선택된 구가 없습니다.")
+    elif sel_count <= 5:
+        st.success(f"✅ {sel_count}개 구 선택됨 (권장 범위)")
+    elif sel_count <= 10:
+        st.warning(f"⚠️ {sel_count}개 구 선택됨 (실패 가능성 있음)")
+    else:
+        st.error(f"🚨 {sel_count}개 구 선택됨 (강력히 비권장)")
+
+    with st.expander("⚙️ 고급 호출 설정", expanded=False):
+        call_interval = st.slider("호출 간격(초)", 0.1, 2.0, 0.5, 0.1)
+        max_retries = st.slider("실패 시 자동 재시도 횟수", 0, 3, 2)
+        months_to_fetch = st.slider("조회 월 범위", 1, 6, 2)
 
     apply_estimation = st.checkbox(
         "🌟 추정 현재시세 자동 산출 (R-ONE 지수 적용)",
@@ -251,37 +308,112 @@ with st.sidebar:
         help="실시간성 강화를 위해 신고일 기준 최근 30일 거래만 평균에 반영."
     )
 
-    if st.button("📥 실거래가 싹 가져오기"):
-        target_districts = district_code if selected_option == "전체 지역 (목록 전체)" else {selected_option: district_code[selected_option]}
+    fetch_clicked = st.button(
+        f"📥 선택된 {sel_count}개 구 데이터 수집",
+        type="primary",
+        disabled=(sel_count == 0),
+        use_container_width=True
+    )
+
+    if st.session_state['failed_districts']:
+        st.divider()
+        st.error(f"❌ 이전 시도에서 {len(st.session_state['failed_districts'])}개 구 실패")
+        with st.expander("실패 목록 보기", expanded=True):
+            for fd in st.session_state['failed_districts']:
+                st.write(f"- {fd}")
+        if st.button("🔄 실패한 구만 재시도", use_container_width=True):
+            st.session_state['selected_districts'] = st.session_state['failed_districts'].copy()
+            st.session_state['failed_districts'] = []
+            st.rerun()
+
+    # ===== 실행 로직 =====
+    if fetch_clicked and sel_count > 0:
+        target_districts = {d: district_code[d] for d in selected if d in district_code}
+
         progress_bar = st.progress(0, text="정부 서버 연결 중...")
+        status_box = st.empty()
 
         df_trade_list = []
         df_rent_list = []
-        now = datetime.now()
-        months = [now.strftime("%Y%m"), (now.replace(day=1) - timedelta(days=1)).strftime("%Y%m")]
+        failed_list = []
 
-        total = len(target_districts) * len(months) * 2
+        now = datetime.now()
+        months = []
+        cursor = now
+        for _ in range(months_to_fetch):
+            months.append(cursor.strftime("%Y%m"))
+            cursor = (cursor.replace(day=1) - timedelta(days=1))
+
+        total_steps = len(target_districts) * len(months) * 2
         step = 0
+        success_streak = 0
+        current_interval = call_interval
 
         for name, code in target_districts.items():
-            for ym in months:
-                step += 1
-                progress_bar.progress(step / total, text=f"[{name}] {ym} 매매 수신 중...")
-                df_raw_trade = fetch_trade_data(code, ym, api_key_decoded)
-                if df_raw_trade is not None and not df_raw_trade.empty:
-                    df_raw_trade['구'] = name
-                    df_trade_list.append(df_raw_trade)
-                time.sleep(0.1)
+            district_success = True
+            district_records = 0
 
+            for ym in months:
+                # 매매 호출
                 step += 1
-                progress_bar.progress(step / total, text=f"[{name}] {ym} 전월세 수신 중...")
-                df_raw_rent = fetch_rent_data(code, ym, api_key_decoded)
-                if df_raw_rent is not None and not df_raw_rent.empty:
-                    df_raw_rent['구'] = name
-                    df_rent_list.append(df_raw_rent)
-                time.sleep(0.1)
+                trade_ok = False
+                for attempt in range(max_retries + 1):
+                    progress_bar.progress(
+                        step / total_steps,
+                        text=f"[{name}] {ym} 매매 수신 중... (시도 {attempt+1}/{max_retries+1})"
+                    )
+                    df_raw_trade = fetch_trade_data(code, ym, api_key_decoded)
+                    if df_raw_trade is not None:
+                        if not df_raw_trade.empty:
+                            df_raw_trade['구'] = name
+                            df_trade_list.append(df_raw_trade)
+                            district_records += len(df_raw_trade)
+                        trade_ok = True
+                        break
+                    time.sleep(current_interval * (attempt + 2))
+
+                if not trade_ok:
+                    district_success = False
+
+                time.sleep(current_interval)
+
+                # 전월세 호출
+                step += 1
+                rent_ok = False
+                for attempt in range(max_retries + 1):
+                    progress_bar.progress(
+                        step / total_steps,
+                        text=f"[{name}] {ym} 전월세 수신 중... (시도 {attempt+1}/{max_retries+1})"
+                    )
+                    df_raw_rent = fetch_rent_data(code, ym, api_key_decoded)
+                    if df_raw_rent is not None:
+                        if not df_raw_rent.empty:
+                            df_raw_rent['구'] = name
+                            df_rent_list.append(df_raw_rent)
+                        rent_ok = True
+                        break
+                    time.sleep(current_interval * (attempt + 2))
+
+                if not rent_ok:
+                    district_success = False
+
+                time.sleep(current_interval)
+
+            if district_success:
+                success_streak += 1
+                status_box.info(f"✅ {name} 완료 ({district_records}건). 누적 성공: {success_streak}")
+                if success_streak >= 5 and current_interval > 0.2:
+                    current_interval = max(0.2, current_interval * 0.8)
+            else:
+                failed_list.append(name)
+                success_streak = 0
+                current_interval = min(2.0, current_interval * 1.5)
+                status_box.warning(f"⚠️ {name} 일부/전체 실패. 간격 {current_interval:.1f}초로 조정")
 
         progress_bar.empty()
+        status_box.empty()
+
+        st.session_state['failed_districts'] = failed_list
 
         if df_trade_list:
             df_all_trade = pd.concat(df_trade_list, ignore_index=True)
@@ -305,14 +437,12 @@ with st.sidebar:
             df_clean['조인키_아파트'] = df_clean['아파트명'].astype(str).str.replace(' ', '')
             df_clean['조인키_평형'] = df_clean['평형'].apply(lambda x: round(x))
 
-            # --- 전월세 데이터 가공 ---
             if df_rent_list:
                 df_all_rent = pd.concat(df_rent_list, ignore_index=True)
                 df_all_rent['평형'] = pd.to_numeric(df_all_rent['전용면적'], errors='coerce').fillna(0).apply(lambda x: round(x / 3.3, 1))
                 df_all_rent['보증금(억)'] = pd.to_numeric(df_all_rent['보증금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int) / 10000
                 df_all_rent['월세(만)'] = pd.to_numeric(df_all_rent['월세금액'].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0).astype(int)
 
-                # 최근 30일 필터 옵션
                 if rent_recent_only:
                     df_all_rent['년'] = df_all_rent['년'].astype(str).str.zfill(4)
                     df_all_rent['월'] = df_all_rent['월'].astype(str).str.zfill(2)
@@ -347,13 +477,11 @@ with st.sidebar:
                 df_clean['월세보증금(억)'] = 0
                 df_clean['월세액(만원)'] = 0
 
-            # --- [신규] 추정 현재시세 산출 ---
             df_clean['데이터신선도'] = df_clean['거래일'].apply(freshness_label)
 
             if apply_estimation:
                 with st.spinner("🌟 한국부동산원 지수 기반 추정 시세 계산 중..."):
-                    est_prices = []
-                    cum_changes = []
+                    est_prices, cum_changes = [], []
                     for _, row in df_clean.iterrows():
                         est, chg = estimate_today_price(
                             row['매매가(억)'], row['거래일'], row['시군구'], reb_api_key
@@ -377,10 +505,17 @@ with st.sidebar:
                 '거래일', '전고점(억)', '입지점수'
             ]
             st.session_state['fetched_data'] = df_clean[cols_to_keep]
-            st.success(f"✅ 총 {len(df_clean)}건 수집 완료!")
-        else:
-            st.warning("⚠️ 수집된 데이터가 없습니다.")
 
+            success_count = sel_count - len(failed_list)
+            if failed_list:
+                st.warning(
+                    f"⚠️ {success_count}/{sel_count}개 구 수집 완료 (총 {len(df_clean)}건). "
+                    f"실패한 {len(failed_list)}개 구는 [재시도] 버튼으로 복구 가능합니다."
+                )
+            else:
+                st.success(f"✅ {sel_count}개 구 전체 수집 완료! 총 {len(df_clean)}건")
+        else:
+            st.error("⚠️ 수집된 데이터가 없습니다. 모든 구가 실패했을 가능성이 있습니다.")
 
 # --------------------------------------------------------------------------
 # [3] 메인 화면 (3개 탭)
