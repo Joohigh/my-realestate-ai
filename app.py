@@ -18,6 +18,7 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
     st.stop()
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+GEMINI_MODEL = "gemini-flash-latest"  # 모델 변경 시 이 한 줄만 수정
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 # R-ONE(한국부동산원) API 키는 별도 신청이 필요할 수 있음.
@@ -813,16 +814,15 @@ with tab2:
                 st.info("👆 분석할 매물을 선택해주세요.")
 
         # =================================================
-            # 🎯 지역 기반 AI 추천 상담 (NEW)
+            # 🎯 지역 기반 AI 추천 상담 (다중 목적 지원)
             # =================================================
             st.divider()
             st.header("🎯 지역 기반 AI 단지 추천 상담")
-            st.info("💡 수집된 실거래 데이터를 기반으로 AI가 지역별 추천 단지를 분석합니다.")
+            st.info("💡 수집된 실거래 데이터를 기반으로 AI가 지역별 추천 단지를 분석합니다. **여러 목적을 동시 선택**하면 종합 점수로 균형형 추천을 받을 수 있습니다.")
 
             # 추천 조건 입력 영역
-            rec_col1, rec_col2, rec_col3 = st.columns(3)
+            rec_col1, rec_col2 = st.columns(2)
             with rec_col1:
-                # 지역 선택 (시군구 단위)
                 df_sheet['_시군구'] = df_sheet['지역'].astype(str).str.split(' ').str[:2].str.join(' ')
                 region_options = sorted(df_sheet['_시군구'].unique().tolist())
                 selected_rec_region = st.selectbox(
@@ -832,12 +832,6 @@ with tab2:
                     placeholder="예: 서울 강남구"
                 )
             with rec_col2:
-                rec_purpose = st.selectbox(
-                    "🎯 투자 목적",
-                    ["실거주 (장기보유)", "시세차익 투자", "갭투자 (전세 레버리지)", "월세 수익형"],
-                    index=0
-                )
-            with rec_col3:
                 rec_budget_max = st.number_input(
                     "💰 최대 예산 (억)",
                     min_value=1.0,
@@ -845,13 +839,37 @@ with tab2:
                     step=1.0
                 )
 
+            # 다중 목적 선택
+            rec_purposes = st.multiselect(
+                "🎯 투자 목적 (다중 선택 가능 — 여러 개 선택 시 종합 점수로 추천)",
+                ["실거주 (장기보유)", "시세차익 투자", "갭투자 (전세 레버리지)", "월세 수익형"],
+                default=["실거주 (장기보유)"],
+                help="실거주와 투자를 동시에 선택하면 두 목적의 균형 점수를 산출합니다."
+            )
+
+            # 다중 선택 시 가중치 조정
+            weights = {}
+            if len(rec_purposes) > 1:
+                with st.expander("⚖️ 목적별 가중치 조정 (합 100%)", expanded=True):
+                    st.caption("각 목적의 중요도를 조정하세요. 자동으로 100%로 정규화됩니다.")
+                    raw_weights = {}
+                    cols = st.columns(len(rec_purposes))
+                    default_w = round(100 / len(rec_purposes))
+                    for i, p in enumerate(rec_purposes):
+                        with cols[i]:
+                            raw_weights[p] = st.slider(p, 0, 100, default_w, 5, key=f"w_{p}")
+                    total_w = sum(raw_weights.values()) or 1
+                    weights = {p: w / total_w for p, w in raw_weights.items()}
+            else:
+                for p in rec_purposes:
+                    weights[p] = 1.0
+
             rec_col4, rec_col5 = st.columns(2)
             with rec_col4:
                 rec_pyung_range = st.slider("📐 평형 범위", 10, 80, (20, 40))
             with rec_col5:
                 rec_top_n = st.slider("🏆 추천 단지 수", 3, 15, 5)
 
-            # 세션 상태 초기화
             if 'messages_recommend' not in st.session_state:
                 st.session_state['messages_recommend'] = []
             if 'context_recommend' not in st.session_state:
@@ -860,8 +878,10 @@ with tab2:
             if st.button("🚀 AI 추천 분석 시작", type="primary", key="btn_recommend"):
                 if selected_rec_region is None:
                     st.error("⚠️ 지역을 선택해 주세요.")
+                elif not rec_purposes:
+                    st.error("⚠️ 최소 1개 이상의 투자 목적을 선택해 주세요.")
                 else:
-                    # 1단계: 데이터 필터링
+                    # 1단계: 기본 필터링
                     df_candidates = df_sheet[
                         (df_sheet['_시군구'] == selected_rec_region)
                         & (df_sheet['평형'] >= rec_pyung_range[0])
@@ -873,71 +893,104 @@ with tab2:
                     if df_candidates.empty:
                         st.warning("⚠️ 조건에 맞는 단지가 없습니다. 예산이나 평형 범위를 조정해 보세요.")
                     else:
-                        # 2단계: 목적별 사전 필터/정렬
+                        # 2단계: 목적별 개별 점수 산출 (0~100 정규화)
                         df_candidates['갭(억)'] = df_candidates['추정현재시세(억)'] - df_candidates['전세가(억)']
 
-                        if rec_purpose == "실거주 (장기보유)":
-                            df_candidates = df_candidates.sort_values(
-                                by=['입지점수', '추정현재시세(억)'],
-                                ascending=[False, True]
-                            )
-                            purpose_criteria = "입지·생활편의·학군·장기 거주 만족도"
-                        elif rec_purpose == "시세차익 투자":
+                        def normalize(series, ascending=False):
+                            """min-max 정규화 (0~100). ascending=True면 작을수록 높은 점수."""
+                            if series.empty or series.max() == series.min():
+                                return pd.Series([50] * len(series), index=series.index)
+                            normalized = (series - series.min()) / (series.max() - series.min()) * 100
+                            return (100 - normalized) if ascending else normalized
+
+                        # 실거주 점수: 입지점수 + 신축 가산
+                        if "실거주 (장기보유)" in rec_purposes:
+                            build_year = pd.to_numeric(df_candidates['건축년도'], errors='coerce').fillna(1990)
+                            age_score = normalize(2026 - build_year, ascending=True)
+                            location_score = normalize(df_candidates['입지점수'])
+                            df_candidates['_점수_실거주'] = (location_score * 0.6 + age_score * 0.4)
+                        else:
+                            df_candidates['_점수_실거주'] = 0
+
+                        # 시세차익 점수: 전고점 대비 하락률 + 입지
+                        if "시세차익 투자" in rec_purposes:
                             df_candidates['하락률(%)'] = df_candidates.apply(
                                 lambda x: ((x['전고점(억)'] - x['추정현재시세(억)']) / x['전고점(억)'] * 100)
                                 if x.get('전고점(억)', 0) > 0 else 0,
                                 axis=1
                             )
-                            df_candidates = df_candidates.sort_values(
-                                by=['하락률(%)', '입지점수'],
-                                ascending=[False, False]
-                            )
-                            purpose_criteria = "전고점 대비 저평가율, 향후 가격 회복·상승 여력"
-                        elif rec_purpose == "갭투자 (전세 레버리지)":
-                            df_candidates = df_candidates[df_candidates['갭(억)'] > 0]
-                            df_candidates = df_candidates.sort_values(
-                                by=['갭(억)', '입지점수'],
-                                ascending=[True, False]
-                            )
-                            purpose_criteria = "낮은 갭(투자금) 대비 미래 가치, 전세가율"
-                        else:  # 월세 수익형
-                            df_candidates = df_candidates[df_candidates['월세액(만원)'] > 0]
+                            drop_score = normalize(df_candidates['하락률(%)'])
+                            location_score = normalize(df_candidates['입지점수'])
+                            df_candidates['_점수_시세차익'] = (drop_score * 0.7 + location_score * 0.3)
+                        else:
+                            df_candidates['_점수_시세차익'] = 0
+
+                        # 갭투자 점수: 갭 작을수록 + 입지
+                        if "갭투자 (전세 레버리지)" in rec_purposes:
+                            df_gap = df_candidates[df_candidates['갭(억)'] > 0]
+                            if not df_gap.empty:
+                                gap_score = normalize(df_gap['갭(억)'], ascending=True)
+                                location_score = normalize(df_gap['입지점수'])
+                                df_candidates.loc[df_gap.index, '_점수_갭투자'] = (gap_score * 0.7 + location_score * 0.3)
+                            df_candidates['_점수_갭투자'] = df_candidates.get('_점수_갭투자', 0).fillna(0)
+                        else:
+                            df_candidates['_점수_갭투자'] = 0
+
+                        # 월세수익 점수: 연수익률
+                        if "월세 수익형" in rec_purposes:
                             df_candidates['연수익률(%)'] = df_candidates.apply(
                                 lambda x: (x['월세액(만원)'] * 12 / 10000) / x['추정현재시세(억)'] * 100
-                                if x['추정현재시세(억)'] > 0 else 0,
+                                if x['추정현재시세(억)'] > 0 and x['월세액(만원)'] > 0 else 0,
                                 axis=1
                             )
-                            df_candidates = df_candidates.sort_values(
-                                by='연수익률(%)', ascending=False
-                            )
-                            purpose_criteria = "월세 수익률, 공실 리스크, 임차 수요"
-
-                        if df_candidates.empty:
-                            st.warning("⚠️ 해당 목적에 부합하는 데이터가 부족합니다.")
+                            df_candidates['_점수_월세'] = normalize(df_candidates['연수익률(%)'])
                         else:
-                            # 3단계: 상위 N건 추출 후 AI 컨텍스트 구성
-                            df_top = df_candidates.head(rec_top_n)
+                            df_candidates['_점수_월세'] = 0
+
+                        # 3단계: 가중 종합 점수 산출
+                        score_map = {
+                            "실거주 (장기보유)": '_점수_실거주',
+                            "시세차익 투자": '_점수_시세차익',
+                            "갭투자 (전세 레버리지)": '_점수_갭투자',
+                            "월세 수익형": '_점수_월세',
+                        }
+                        df_candidates['종합점수'] = 0.0
+                        for purpose, weight in weights.items():
+                            col = score_map[purpose]
+                            df_candidates['종합점수'] += df_candidates[col] * weight
+
+                        df_candidates = df_candidates.sort_values(by='종합점수', ascending=False)
+                        df_top = df_candidates.head(rec_top_n)
+
+                        if df_top.empty:
+                            st.warning("⚠️ 종합 점수 계산 결과 추천 가능한 단지가 없습니다.")
+                        else:
                             display_cols = [
                                 '아파트명', '지역', '평형', '층', '건축년도',
-                                '매매가(억)', '추정현재시세(억)', '전세가(억)',
-                                '갭(억)', '데이터신선도', '거래일'
+                                '매매가(억)', '추정현재시세(억)', '전세가(억)', '갭(억)',
+                                '종합점수', '데이터신선도', '거래일'
                             ]
                             display_cols = [c for c in display_cols if c in df_top.columns]
 
-                            st.subheader(f"📊 1차 후보 단지 ({len(df_top)}건)")
+                            purpose_summary = " + ".join([f"{p}({weights[p]*100:.0f}%)" for p in rec_purposes])
+                            st.subheader(f"📊 1차 후보 단지 ({len(df_top)}건) — {purpose_summary}")
                             st.dataframe(
                                 df_top[display_cols].style.format({
                                     '매매가(억)': '{:.2f}',
                                     '추정현재시세(억)': '{:.2f}',
                                     '전세가(억)': '{:.2f}',
-                                    '갭(억)': '{:.2f}'
+                                    '갭(억)': '{:.2f}',
+                                    '종합점수': '{:.1f}점'
                                 }),
                                 use_container_width=True,
                                 hide_index=True
                             )
 
-                            # AI 컨텍스트로 사용할 데이터 요약
+                            # AI 컨텍스트 구성
                             data_for_ai = df_top[display_cols].to_string(index=False)
+                            criteria_text = "\n".join([
+                                f"  - {p} (가중치 {weights[p]*100:.0f}%)" for p in rec_purposes
+                            ])
 
                             system_prompt_rec = f"""
                             너는 대한민국 최고의 부동산 투자 컨설턴트야.
@@ -946,8 +999,8 @@ with tab2:
 
                             [사용자 요청]
                             - 지역: {selected_rec_region}
-                            - 투자 목적: {rec_purpose}
-                            - 평가 기준: {purpose_criteria}
+                            - 투자 목적 (다중):
+                            {criteria_text}
                             - 예산: {rec_budget_max}억 이하
                             - 평형: {rec_pyung_range[0]}~{rec_pyung_range[1]}평
                             - 추천 단지 수: {rec_top_n}곳
@@ -957,7 +1010,7 @@ with tab2:
                             - 연 소득: {user_income}천만 원
                             - 예상 대출금리: {target_loan_rate}%
 
-                            [후보 단지 리스트 — 반드시 이 안에서만 추천]
+                            [후보 단지 리스트 — 종합점수 기준 정렬됨]
                             {data_for_ai}
 
                             아래 형식으로 답변해줘:
@@ -965,27 +1018,30 @@ with tab2:
                             ## 🏆 추천 단지 TOP {min(3, rec_top_n)}
 
                             ### 1순위: [단지명] ([평형])
-                            - **추천 이유**: (목적 부합도, 가격 매력도, 데이터 신선도 종합)
+                            - **종합점수**: 표에 표기된 점수 명시
+                            - **목적별 부합도**: 사용자가 선택한 각 목적({', '.join(rec_purposes)})에 대해 이 단지가 어떤 강점/약점을 갖는지 구분 설명
                             - **재무 시뮬레이션**: 자기자본 / 필요 대출 / DSR 추정 / 월 상환액
-                            - **리스크 요인**: (데이터 신선도가 낮으면 반드시 명시, 갭투자 시 전세 하락 리스크 등)
+                            - **리스크 요인**: (데이터 신선도가 🟠/🔴이면 반드시 명시, 갭투자 시 전세 하락 리스크 등)
 
                             ### 2순위: ...
                             ### 3순위: ...
 
                             ## 📌 종합 인사이트
-                            (해당 지역의 시장 흐름, 사용자 자금력 대비 적정성, 의사결정 시 추가로 확인할 사항)
+                            - 다중 목적 균형 관점에서 사용자에게 가장 적합한 1개 단지를 최종 추천하고 그 이유 명시
+                            - 사용자 자금력 대비 적정성 정량 판단
+                            - 의사결정 시 추가 확인 사항
 
                             중요 지침:
-                            1. 데이터 신선도가 🟠/🔴인 단지는 추정시세 신뢰도가 낮으니 반드시 면책 문구를 포함할 것
-                            2. 사용자의 자금력으로 감당 가능한지 정량적으로 판단할 것
-                            3. 추측이나 일반론은 배제하고, 위 데이터에 근거한 답변만 할 것
+                            1. 사용자가 여러 목적을 선택했으므로, 각 단지가 모든 목적에 대해 어떻게 평가되는지 균형 있게 설명할 것
+                            2. 데이터 신선도가 🟠/🔴인 단지는 추정시세 신뢰도가 낮으니 반드시 면책 문구 포함
+                            3. 위 데이터에 근거한 답변만 할 것 (외부 단지 추가 금지)
                             """
                             st.session_state['context_recommend'] = system_prompt_rec
                             st.session_state['messages_recommend'] = []
 
-                            with st.spinner("AI가 후보 단지를 정밀 분석 중입니다..."):
+                            with st.spinner("AI가 다중 목적 종합 분석 중입니다..."):
                                 try:
-                                    model = genai.GenerativeModel('gemini-1.5-flash')
+                                    model = genai.GenerativeModel(GEMINI_MODEL)
                                     response = model.generate_content(system_prompt_rec)
                                     st.session_state['messages_recommend'].append({
                                         "role": "assistant",
@@ -1005,7 +1061,7 @@ with tab2:
                         st.markdown(msg['content'])
 
                 if rec_prompt := st.chat_input(
-                    "추천 결과에 대한 후속 질문 (예: 1순위 단지 대출 시뮬레이션 더 자세히)",
+                    "추천 결과에 대한 후속 질문 (예: 1순위 단지의 갭투자 관점 리스크는?)",
                     key="chat_recommend"
                 ):
                     with st.chat_message("user"):
@@ -1018,7 +1074,7 @@ with tab2:
                     with st.chat_message("assistant"):
                         msg_placeholder = st.empty()
                         try:
-                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            model = genai.GenerativeModel(GEMINI_MODEL)
                             history_text = ""
                             for m in st.session_state['messages_recommend'][:-1]:
                                 role_name = "사용자" if m['role'] == 'user' else "AI"
@@ -1037,10 +1093,6 @@ with tab2:
                             })
                         except Exception as e:
                             msg_placeholder.error(f"오류: {e}")
-        else:
-            st.warning("데이터가 없습니다. [📥 실거래가 저장] 탭에서 데이터를 수집해주세요.")
-    except Exception as e:
-        st.error(f"오류: {e}")
 
 
 # --- TAB 3: 서울 청약 일정 및 자문 ---
