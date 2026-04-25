@@ -947,9 +947,9 @@ with tab2:
 
             rec_col4, rec_col5 = st.columns(2)
             with rec_col4:
-                rec_pyung_range = st.slider("📐 평형 범위", 10, 80, (20, 40), key="rec_pyung")
+                rec_pyung_range = st.slider("📐 평형 범위", 10, 80, (20, 30), key="rec_pyung")
             with rec_col5:
-                rec_top_n = st.slider("🏆 추천 단지 수", 3, 15, 5)
+                rec_top_n = st.slider("🏆 추천 단지 수", 3, 15, 10)
 
             if 'messages_recommend' not in st.session_state:
                 st.session_state['messages_recommend'] = []
