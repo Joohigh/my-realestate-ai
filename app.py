@@ -562,7 +562,12 @@ with st.sidebar:
 # --------------------------------------------------------------------------
 # [3] 메인 화면 (3개 탭)
 # --------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(["📥 실거래가 저장", "🏆 랭킹 & 💬 매매 자문", "📅 서울 청약 & 💬 청약 자문"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📥 실거래가 저장",
+    "🏆 랭킹 & 💬 매매 자문",
+    "📅 서울 청약 & 💬 청약 자문",
+    "📚 자문 이력 조회"
+])
 
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -823,6 +828,42 @@ with tab2:
                         except Exception as e:
                             st.error(f"AI 호출 오류: {e}")
 
+                # --- 자문 이력 저장 / 다운로드 버튼 ---
+                if st.session_state.get('messages_tab2'):
+                    save_col1, save_col2 = st.columns(2)
+                    with save_col1:
+                        if st.button("💾 이 자문을 시트에 저장", key="save_tab2", use_container_width=True):
+                            full_content = "\n\n---\n\n".join([
+                                f"[{m['role']}]\n{m['content']}" for m in st.session_state['messages_tab2']
+                            ])
+                            conditions_str = (
+                                f"매물: {target['아파트명']}({target['평형']}평) | "
+                                f"현금: {user_cash}억 | 연소득: {user_income}천만 | 금리: {target_loan_rate}%"
+                            )
+                            ok, info = save_advisory_log(
+                                advisory_type="매물단건",
+                                target=selected_key,
+                                conditions=conditions_str,
+                                ai_content=full_content,
+                                user_question=""
+                            )
+                            if ok:
+                                st.success(f"✅ 시트에 저장 완료 (현재 누적 {info}건)")
+                            else:
+                                st.error(f"저장 실패: {info}")
+                    with save_col2:
+                        md_text = export_chat_to_markdown(
+                            st.session_state['messages_tab2'],
+                            title=f"매물 자문 - {selected_key}"
+                        )
+                        st.download_button(
+                            "📥 마크다운(.md) 다운로드",
+                            data=md_text,
+                            file_name=f"자문_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                            mime="text/markdown",
+                            key="dl_tab2",
+                            use_container_width=True
+                        )
                 for msg in st.session_state.get('messages_tab2', []):
                     with st.chat_message(msg['role']):
                         st.markdown(msg['content'])
@@ -1085,7 +1126,42 @@ with tab2:
             if st.session_state.get('messages_recommend'):
                 st.divider()
                 st.subheader("💬 AI 추천 분석 결과 및 후속 상담")
-
+# --- 자문 이력 저장 / 다운로드 버튼 ---
+                rec_save_col1, rec_save_col2 = st.columns(2)
+                with rec_save_col1:
+                    if st.button("💾 이 추천 분석을 시트에 저장", key="save_recommend", use_container_width=True):
+                        full_content = "\n\n---\n\n".join([
+                            f"[{m['role']}]\n{m['content']}" for m in st.session_state['messages_recommend']
+                        ])
+                        purpose_str = " + ".join([f"{p}({weights.get(p, 0)*100:.0f}%)" for p in rec_purposes])
+                        conditions_str = (
+                            f"지역: {selected_rec_region} | 예산: {rec_budget_max}억 | "
+                            f"평형: {rec_pyung_range[0]}~{rec_pyung_range[1]}평 | 목적: {purpose_str}"
+                        )
+                        ok, info = save_advisory_log(
+                            advisory_type="지역추천",
+                            target=selected_rec_region,
+                            conditions=conditions_str,
+                            ai_content=full_content,
+                            user_question=""
+                        )
+                        if ok:
+                            st.success(f"✅ 시트에 저장 완료 (현재 누적 {info}건)")
+                        else:
+                            st.error(f"저장 실패: {info}")
+                with rec_save_col2:
+                    md_text = export_chat_to_markdown(
+                        st.session_state['messages_recommend'],
+                        title=f"지역 추천 자문 - {selected_rec_region}"
+                    )
+                    st.download_button(
+                        "📥 마크다운(.md) 다운로드",
+                        data=md_text,
+                        file_name=f"추천_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key="dl_recommend",
+                        use_container_width=True
+                    )
                 for msg in st.session_state['messages_recommend']:
                     with st.chat_message(msg['role']):
                         st.markdown(msg['content'])
@@ -1194,6 +1270,44 @@ with tab3:
                     except Exception as e:
                         st.error(f"AI 호출 오류: {e}")
 
+            # --- 자문 이력 저장 / 다운로드 버튼 ---
+            if st.session_state.get('messages_tab3'):
+                t3_save_col1, t3_save_col2 = st.columns(2)
+                with t3_save_col1:
+                    if st.button("💾 이 청약 자문을 시트에 저장", key="save_tab3", use_container_width=True):
+                        full_content = "\n\n---\n\n".join([
+                            f"[{m['role']}]\n{m['content']}" for m in st.session_state['messages_tab3']
+                        ])
+                        homeless_str = f"무주택{homeless_years}년" if is_homeless else "유주택"
+                        conditions_str = (
+                            f"현금: {user_cash}억 | 연소득: {user_income}천만 | "
+                            f"{homeless_str} | 신혼{is_newlywed} | 생애최초{is_first_time} | "
+                            f"자녀{children_count}명 | 청약통장{sub_account_years}년"
+                        )
+                        ok, info = save_advisory_log(
+                            advisory_type="청약",
+                            target=f"서울 청약 ({datetime.now().strftime('%Y-%m')})",
+                            conditions=conditions_str,
+                            ai_content=full_content,
+                            user_question=""
+                        )
+                        if ok:
+                            st.success(f"✅ 시트에 저장 완료 (현재 누적 {info}건)")
+                        else:
+                            st.error(f"저장 실패: {info}")
+                with t3_save_col2:
+                    md_text = export_chat_to_markdown(
+                        st.session_state['messages_tab3'],
+                        title="서울 청약 자문"
+                    )
+                    st.download_button(
+                        "📥 마크다운(.md) 다운로드",
+                        data=md_text,
+                        file_name=f"청약자문_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key="dl_tab3",
+                        use_container_width=True
+                    )
             for msg in st.session_state.get('messages_tab3', []):
                 with st.chat_message(msg['role']):
                     st.markdown(msg['content'])
@@ -1229,3 +1343,49 @@ with tab3:
             st.warning("현재 진행 중이거나 예정된 서울 지역 아파트 청약 공고가 없습니다.")
         else:
             st.error("🚨 청약 데이터를 불러오지 못했습니다. 공공데이터포털에서 활용 신청을 확인해주세요.")
+
+# --- TAB 4: AI 자문 이력 조회 ---
+with tab4:
+    st.header("📚 AI 자문 이력 아카이브")
+    st.info("💡 시트에 저장된 모든 AI 자문 이력을 조회하고 시계열로 분석합니다.")
+
+    try:
+        conn_view = st.connection("gsheets", type=GSheetsConnection)
+        try:
+            df_history = conn_view.read(worksheet="AI자문이력", ttl=0)
+        except Exception:
+            df_history = pd.DataFrame()
+
+        if df_history is None or df_history.empty:
+            st.warning("저장된 자문 이력이 없습니다. 각 탭에서 [💾 시트에 저장] 버튼으로 자문을 보관해 보세요.")
+        else:
+            df_history = df_history.dropna(subset=['저장일시']).sort_values(by='저장일시', ascending=False)
+
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                type_options = ["전체"] + sorted(df_history['자문유형'].dropna().unique().tolist())
+                filter_type = st.selectbox("자문 유형 필터", type_options)
+            with col_f2:
+                search_target = st.text_input("대상 검색", placeholder="예: 강남구, 은마")
+            with col_f3:
+                show_count = st.slider("표시 건수", 5, 50, 20)
+
+            df_view = df_history.copy()
+            if filter_type != "전체":
+                df_view = df_view[df_view['자문유형'] == filter_type]
+            if search_target:
+                df_view = df_view[df_view['대상'].astype(str).str.contains(search_target, na=False)]
+
+            df_view = df_view.head(show_count)
+            st.caption(f"📊 총 {len(df_history)}건 중 {len(df_view)}건 표시")
+
+            for idx, row in df_view.iterrows():
+                with st.expander(
+                    f"🗓️ {row['저장일시']} | [{row['자문유형']}] {row['대상']}",
+                    expanded=False
+                ):
+                    st.markdown(f"**📋 분석 시점 조건**: {row['사용자조건']}")
+                    st.divider()
+                    st.markdown(row['AI분석내용'])
+    except Exception as e:
+        st.error(f"이력 조회 오류: {e}")
