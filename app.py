@@ -918,7 +918,7 @@ with tab2:
                 rec_budget_max = st.number_input(
                     "💰 최대 예산 (억)",
                     min_value=1.0,
-                    value=20.0,
+                    value=9.0,
                     step=1.0
                 )
 
