@@ -200,6 +200,47 @@ def freshness_label(deal_date_str):
         return "🟠 보통(3개월)"
     return "🔴 참고용(3개월+)"
 
+# --------------------------------------------------------------------------
+# [함수 그룹 C] AI 자문 이력 저장/조회
+# --------------------------------------------------------------------------
+def save_advisory_log(advisory_type, target, conditions, ai_content, user_question=""):
+    """
+    AI 자문 내용을 구글 시트의 'AI자문이력' 워크시트에 누적 저장.
+    워크시트가 없으면 자동 생성.
+    """
+    try:
+        conn_log = st.connection("gsheets", type=GSheetsConnection)
+        try:
+            df_log = conn_log.read(worksheet="AI자문이력", ttl=0)
+            if df_log is None or df_log.empty:
+                df_log = pd.DataFrame(columns=["저장일시", "자문유형", "대상", "사용자조건", "AI분석내용", "사용자질문"])
+        except Exception:
+            df_log = pd.DataFrame(columns=["저장일시", "자문유형", "대상", "사용자조건", "AI분석내용", "사용자질문"])
+
+        new_row = pd.DataFrame([{
+            "저장일시": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "자문유형": advisory_type,
+            "대상": str(target)[:200],
+            "사용자조건": str(conditions)[:500],
+            "AI분석내용": str(ai_content)[:5000],
+            "사용자질문": str(user_question)[:500],
+        }])
+
+        df_updated = pd.concat([df_log, new_row], ignore_index=True)
+        conn_log.update(worksheet="AI자문이력", data=df_updated)
+        return True, len(df_updated)
+    except Exception as e:
+        return False, str(e)
+
+
+def export_chat_to_markdown(messages, title="AI 자문 기록"):
+    """현재 채팅 내역을 마크다운 텍스트로 변환."""
+    md = f"# {title}\n\n"
+    md += f"**저장일시**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n---\n\n"
+    for m in messages:
+        role = "🤵 사용자" if m['role'] == 'user' else "🤖 AI 컨설턴트"
+        md += f"## {role}\n\n{m['content']}\n\n---\n\n"
+    return md
 
 # --------------------------------------------------------------------------
 # [2] 사이드바
