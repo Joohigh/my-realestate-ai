@@ -4,9 +4,11 @@ import requests
 import xml.etree.ElementTree as ET
 from streamlit_gsheets import GSheetsConnection
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions  # [CHANGED] 429(ResourceExhausted) 분기 처리용
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 import time
+import random  # [CHANGED] 지수 백오프 지터(jitter)용
 
 # --------------------------------------------------------------------------
 # [1] 설정 및 초기화
@@ -18,17 +20,95 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
     st.stop()
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-# [수정] 검색 기능의 안정성을 위해 최신 안정화 버전으로 명시합니다.
-GEMINI_MODEL = "gemini-2.5-flash"  
+
+# [CHANGED] 별칭(gemini-flash-latest)은 구글이 가리키는 실제 모델이 바뀌면 할당량 정책도 흔들린다.
+# 명시적 버전을 고정해 동작과 한도를 예측 가능하게 한다. (필요 시 secrets로 오버라이드)
+GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+# [CHANGED] AI 호출 동작을 제어하는 설정 상수 (매직 넘버/스트링 제거)
+SEARCH_TOOL = "google_search_retrieval"
+# 후속 질문에 검색 도구를 켤지 결정하는 트리거 키워드. 단순 질문에는 검색을 끄고 토큰을 아낀다.
+SEARCH_TRIGGERS = ("비교", "시세", "호재", "학군", "최신", "뉴스", "경쟁률", "분양가", "주변", "단지")
+# 후속 질문 시 프롬프트에 포함할 최대 대화 턴 수. 이력 윈도잉으로 TPM 폭증을 막는다.
+MAX_HISTORY_TURNS = 6
+# 429 재시도 정책
+GEMINI_MAX_RETRIES = 4
+
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 # R-ONE(한국부동산원) API 키는 별도 신청이 필요할 수 있음.
-# 동일 공공데이터포털 키로 동작하지 않을 경우 secrets.toml에 REB_API_KEY 추가.
 reb_api_key = unquote(st.secrets.get("REB_API_KEY", st.secrets["PUBLIC_DATA_KEY"]))
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.0)")
+st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.1)")
 st.caption("실거래가 + R-ONE 지수 시세 + AI 실시간 검색 자문 + 청약 컨설팅")
 st.markdown("---")
+
+# --------------------------------------------------------------------------
+# [CHANGED] [함수 그룹 0] Gemini 호출 통합 헬퍼 (429 재시도 + 조건부 검색 + 이력 윈도잉)
+#   - 세 탭에 흩어져 있던 모델 생성/검색도구/이력병합/예외처리를 단일 진입점으로 통합한다.
+# --------------------------------------------------------------------------
+def _build_model(use_search: bool):
+    """검색 도구 사용 여부에 따라 모델 인스턴스를 생성한다."""
+    if use_search:
+        return genai.GenerativeModel(GEMINI_MODEL, tools=SEARCH_TOOL)
+    return genai.GenerativeModel(GEMINI_MODEL)
+
+
+def _should_use_search(text: str) -> bool:
+    """질문에 외부 검색이 필요한 키워드가 포함되어 있는지 판정한다."""
+    return any(keyword in text for keyword in SEARCH_TRIGGERS)
+
+
+def _build_followup_prompt(context_prompt: str, messages: list, user_question: str) -> str:
+    """
+    후속 질문 프롬프트를 구성한다.
+    전체 이력이 아니라 최근 MAX_HISTORY_TURNS개만 포함해 토큰(TPM) 소모를 제한한다.
+    messages는 마지막 항목(방금 추가된 사용자 질문)을 제외하고 슬라이싱한다.
+    """
+    recent = messages[:-1][-MAX_HISTORY_TURNS:] if len(messages) > 1 else []
+    history_text = "".join(
+        f"{'사용자' if m['role'] == 'user' else 'AI'}: {m['content']}\n" for m in recent
+    )
+    return (
+        f"{context_prompt}\n\n[최근 대화 내역]\n{history_text}\n\n사용자 질문: {user_question}"
+    )
+
+
+def ask_gemini(prompt: str, force_search: bool = False):
+    """
+    Gemini 호출의 단일 진입점.
+    - force_search=True 이거나 prompt에 검색 트리거가 있으면 검색 도구를 활성화.
+    - 429(ResourceExhausted) 발생 시 지수 백오프로 재시도. 서버 권장 retry_delay 우선.
+    - 반환: (response_text, error_message). 성공 시 error_message는 None.
+    """
+    use_search = force_search or _should_use_search(prompt)
+    model = _build_model(use_search)
+
+    for attempt in range(GEMINI_MAX_RETRIES):
+        try:
+            response = model.generate_content(prompt)
+            return response.text, None
+        except google_exceptions.ResourceExhausted as e:
+            # 서버가 권장하는 대기 시간이 있으면 우선 사용, 없으면 지수 백오프 + 지터
+            server_wait = getattr(getattr(e, "retry_delay", None), "seconds", 0) or 0
+            wait = server_wait if server_wait > 0 else (2 ** attempt) + random.uniform(0, 1)
+            if attempt < GEMINI_MAX_RETRIES - 1:
+                st.warning(
+                    f"⏳ API 한도 도달. {wait:.0f}초 후 재시도합니다... "
+                    f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
+                )
+                time.sleep(wait)
+            else:
+                return None, (
+                    "🚨 Gemini 무료 등급 한도를 초과했습니다.\n\n"
+                    "- 분당 한도(RPM)라면 1~2분 후 다시 시도하세요.\n"
+                    "- 일일 한도(RPD)라면 태평양 표준시 자정(한국시간 오후 4~5시경) 이후 초기화됩니다.\n"
+                    "- 근본 해결책: Google AI Studio에서 결제를 활성화해 Tier 1으로 전환하면 "
+                    "분당·일일 한도가 크게 늘고, 입력 데이터가 학습에 사용되지 않습니다."
+                )
+        except Exception as e:  # noqa: BLE001 - 그 외 호출 오류는 사용자에게 그대로 전달
+            return None, f"AI 호출 오류: {e}"
+    return None, "알 수 없는 오류로 응답을 받지 못했습니다."
 
 # --------------------------------------------------------------------------
 # [함수 그룹 A] 국토부 실거래가 API
@@ -89,7 +169,8 @@ def fetch_applyhome_data(service_key):
     url = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail"
     params = {"page": 1, "perPage": 100, "serviceKey": service_key}
     try:
-        response = requests.get(url, params=params, verify=False, timeout=10)
+        # [CHANGED] verify=False 제거 — SSL 검증 비활성화는 MITM 위험. 정상 인증서 검증으로 복원.
+        response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             data = response.json()
             if "data" in data:
@@ -126,9 +207,9 @@ def fetch_reb_weekly_index(sigungu_name, weeks_back, service_key):
         "Type": "json",
         "pIndex": 1,
         "pSize": 100,
-        "STATBL_ID": "A_2024_00178", 
-        "DTACYCLE_CD": "WW",         
-        "CLS_ID": sigungu_name,      
+        "STATBL_ID": "A_2024_00178",
+        "DTACYCLE_CD": "WW",
+        "CLS_ID": sigungu_name,
         "START_WRTTIME": start_date.strftime("%Y%m%d"),
         "END_WRTTIME": end_date.strftime("%Y%m%d"),
     }
@@ -639,13 +720,13 @@ with tab2:
                     """
                     st.session_state['context_prompt_tab2'] = system_prompt
                     with st.spinner("AI가 입체적으로 분석 중입니다..."):
-                        try:
-                            # [핵심 수정] 실시간 웹 검색 도구 추가!
-                            model = genai.GenerativeModel(GEMINI_MODEL, tools='google_search_retrieval')
-                            response = model.generate_content(system_prompt)
-                            st.session_state['messages_tab2'].append({"role": "assistant", "content": response.text})
+                        # [CHANGED] 통합 헬퍼 사용. 초기 심층 분석은 검색을 강제 활성화(force_search=True).
+                        text, err = ask_gemini(system_prompt, force_search=True)
+                        if err:
+                            st.error(err)
+                        else:
+                            st.session_state['messages_tab2'].append({"role": "assistant", "content": text})
                             st.rerun()
-                        except Exception as e: st.error(f"AI 호출 오류: {e}")
 
                 if st.session_state.get('messages_tab2'):
                     save_col1, save_col2 = st.columns(2)
@@ -659,7 +740,7 @@ with tab2:
                     with save_col2:
                         md_text = export_chat_to_markdown(st.session_state['messages_tab2'], title=f"매물 자문 - {selected_key}")
                         st.download_button("📥 마크다운 다운로드", data=md_text, file_name=f"자문_{datetime.now().strftime('%Y%m%d_%H%M')}.md", mime="text/markdown", key="dl_tab2", use_container_width=True)
-                
+
                 for msg in st.session_state.get('messages_tab2', []):
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
@@ -668,20 +749,19 @@ with tab2:
                     st.session_state['messages_tab2'].append({"role": "user", "content": prompt})
                     with st.chat_message("assistant"):
                         message_placeholder = st.empty()
-                        try:
-                            # [핵심 수정] 실시간 검색 도구 + 이전 대화 병합
-                            model = genai.GenerativeModel(GEMINI_MODEL, tools='google_search_retrieval')
-                            if 'context_prompt_tab2' in st.session_state and st.session_state['context_prompt_tab2']:
-                                history_text = ""
-                                for m in st.session_state['messages_tab2'][:-1]:
-                                    role_name = "사용자" if m['role'] == 'user' else "AI"
-                                    history_text += f"{role_name}: {m['content']}\n"
-                                final_prompt = f"{st.session_state['context_prompt_tab2']}\n\n[이전 대화 내역]\n{history_text}\n\n사용자 질문: {prompt}"
-                            else: final_prompt = prompt
-                            response = model.generate_content(final_prompt)
-                            message_placeholder.markdown(response.text)
-                            st.session_state['messages_tab2'].append({"role": "assistant", "content": response.text})
-                        except Exception as e: message_placeholder.error(f"오류: {e}")
+                        # [CHANGED] 이력 윈도잉(_build_followup_prompt) + 조건부 검색 + 재시도를 헬퍼에 위임.
+                        # 전체 이력을 재구성하지 않으므로 토큰(TPM) 소모가 크게 줄어든다.
+                        ctx = st.session_state.get('context_prompt_tab2', '')
+                        if ctx:
+                            final_prompt = _build_followup_prompt(ctx, st.session_state['messages_tab2'], prompt)
+                        else:
+                            final_prompt = prompt
+                        text, err = ask_gemini(final_prompt)
+                        if err:
+                            message_placeholder.error(err)
+                        else:
+                            message_placeholder.markdown(text)
+                            st.session_state['messages_tab2'].append({"role": "assistant", "content": text})
             else: st.info("👆 분석할 매물을 선택해주세요.")
 
             st.divider()
@@ -766,7 +846,7 @@ with tab2:
                             [요청] 지역: {selected_rec_region}, 예산: {rec_budget_max}억 이하, 평형: {rec_pyung_range[0]}~{rec_pyung_range[1]}평
                             [재정] 현금: {user_cash}억, 연소득: {user_income}천만원
                             [후보 리스트] {df_top[display_cols].to_string(index=False)}
-                            
+
                             🔥중요 지시사항🔥
                             사용자가 위 리스트에 없는 다른 단지와의 '비교'를 요청하거나, 실시간 정보를 물어보면 반드시 너에게 내장된 '구글 실시간 검색(Google Search)' 기능을 적극적으로 활용해서 외부 데이터도 함께 비교해줘.
 
@@ -775,13 +855,13 @@ with tab2:
                             st.session_state['context_recommend'] = system_prompt_rec
                             st.session_state['messages_recommend'] = []
                             with st.spinner("AI가 다중 목적 종합 분석 중입니다..."):
-                                try:
-                                    # [핵심 수정] 실시간 웹 검색 도구 추가!
-                                    model = genai.GenerativeModel(GEMINI_MODEL, tools='google_search_retrieval')
-                                    response = model.generate_content(system_prompt_rec)
-                                    st.session_state['messages_recommend'].append({"role": "assistant", "content": response.text})
+                                # [CHANGED] 통합 헬퍼 사용 + 초기 분석은 검색 강제 활성화.
+                                text, err = ask_gemini(system_prompt_rec, force_search=True)
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.session_state['messages_recommend'].append({"role": "assistant", "content": text})
                                     st.rerun()
-                                except Exception as e: st.error(f"AI 호출 오류: {e}")
 
             if st.session_state.get('messages_recommend'):
                 st.divider()
@@ -797,7 +877,7 @@ with tab2:
                 with rec_save_col2:
                     md_text = export_chat_to_markdown(st.session_state['messages_recommend'], title=f"지역 추천 자문 - {selected_rec_region}")
                     st.download_button("📥 마크다운 다운로드", data=md_text, file_name=f"추천_{datetime.now().strftime('%Y%m%d_%H%M')}.md", mime="text/markdown", key="dl_recommend", use_container_width=True)
-                
+
                 for msg in st.session_state['messages_recommend']:
                     with st.chat_message(msg['role']): st.markdown(msg['content'])
 
@@ -806,15 +886,18 @@ with tab2:
                     st.session_state['messages_recommend'].append({"role": "user", "content": rec_prompt})
                     with st.chat_message("assistant"):
                         msg_placeholder = st.empty()
-                        try:
-                            # [핵심 수정] 실시간 웹 검색 도구 + 이전 대화 병합 추가!
-                            model = genai.GenerativeModel(GEMINI_MODEL, tools='google_search_retrieval')
-                            history_text = "".join([f"{'사용자' if m['role']=='user' else 'AI'}: {m['content']}\n" for m in st.session_state['messages_recommend'][:-1]])
-                            final_prompt = f"{st.session_state['context_recommend']}\n\n[이전 대화 내역]\n{history_text}\n\n사용자 후속 질문: {rec_prompt}"
-                            response = model.generate_content(final_prompt)
-                            msg_placeholder.markdown(response.text)
-                            st.session_state['messages_recommend'].append({"role": "assistant", "content": response.text})
-                        except Exception as e: msg_placeholder.error(f"오류: {e}")
+                        # [CHANGED] 이력 윈도잉 + 조건부 검색 + 재시도를 헬퍼에 위임.
+                        final_prompt = _build_followup_prompt(
+                            st.session_state['context_recommend'],
+                            st.session_state['messages_recommend'],
+                            rec_prompt,
+                        )
+                        text, err = ask_gemini(final_prompt)
+                        if err:
+                            msg_placeholder.error(err)
+                        else:
+                            msg_placeholder.markdown(text)
+                            st.session_state['messages_recommend'].append({"role": "assistant", "content": text})
 
     except Exception as e: st.error(f"오류: {e}")
 
@@ -822,7 +905,7 @@ with tab2:
 with tab3:
     st.header("📅 서울 아파트 청약 추천 및 컨설팅 (실시간 검색 탑재)")
     st.info("💡 실시간 청약 공고 + 웹 검색을 통해 정확한 분양가와 주변 시세를 찾아 분석해 드립니다.")
-    
+
     if st.button("🔄 최신 서울 청약 일정 불러오기", type="primary"):
         with st.spinner("청약홈 서버에서 서울 지역 공고를 가져오는 중입니다..."):
             df_apply = fetch_applyhome_data(api_key_decoded)
@@ -855,7 +938,7 @@ with tab3:
                 - 청약통장: 가입기간 {sub_account_years}년
 
                 🔥중요 지시사항🔥
-                이 API 공고에는 분양가가 없습니다. 반드시 네게 내장된 '구글 실시간 검색(Google Search)'을 통해 
+                이 API 공고에는 분양가가 없습니다. 반드시 네게 내장된 '구글 실시간 검색(Google Search)'을 통해
                 위 리스트에 있는 주요 아파트들의 최신 예상 분양가, 주변 단지 시세(안전마진 확인), 경쟁률 등을 적극 검색해서 상세한 전략을 짜줘.
 
                 1. 맞춤형 전형 추천 (가점제/추첨제/특공)
@@ -865,13 +948,13 @@ with tab3:
                 st.session_state['context_prompt_tab3'] = system_prompt_tab3
 
                 with st.spinner("AI가 청약 자격과 실시간 시세를 검색해 분석 중입니다..."):
-                    try:
-                        # [핵심 수정] 실시간 웹 검색 도구 추가!
-                        model = genai.GenerativeModel(GEMINI_MODEL, tools='google_search_retrieval')
-                        response = model.generate_content(system_prompt_tab3)
-                        st.session_state['messages_tab3'] = [{"role": "assistant", "content": response.text}]
+                    # [CHANGED] 통합 헬퍼 사용 + 초기 분석은 검색 강제 활성화.
+                    text, err = ask_gemini(system_prompt_tab3, force_search=True)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.session_state['messages_tab3'] = [{"role": "assistant", "content": text}]
                         st.rerun()
-                    except Exception as e: st.error(f"AI 호출 오류: {e}")
 
             if st.session_state.get('messages_tab3'):
                 t3_save_col1, t3_save_col2 = st.columns(2)
@@ -893,18 +976,18 @@ with tab3:
 
                 with st.chat_message("assistant"):
                     message_placeholder = st.empty()
-                    try:
-                        # [핵심 수정] 실시간 웹 검색 도구 + 이전 대화 병합 추가!
-                        model = genai.GenerativeModel(GEMINI_MODEL, tools='google_search_retrieval')
-                        if 'context_prompt_tab3' in st.session_state and st.session_state['context_prompt_tab3']:
-                            history_text = "".join([f"{'사용자' if m['role']=='user' else 'AI'}: {m['content']}\n" for m in st.session_state['messages_tab3'][:-1]])
-                            final_prompt = f"{st.session_state['context_prompt_tab3']}\n\n[이전 대화 내역]\n{history_text}\n\n사용자 질문: {prompt}"
-                        else: final_prompt = prompt
-                        
-                        response = model.generate_content(final_prompt)
-                        message_placeholder.markdown(response.text)
-                        st.session_state['messages_tab3'].append({"role": "assistant", "content": response.text})
-                    except Exception as e: message_placeholder.error(f"오류: {e}")
+                    # [CHANGED] 이력 윈도잉 + 조건부 검색 + 재시도를 헬퍼에 위임.
+                    ctx = st.session_state.get('context_prompt_tab3', '')
+                    if ctx:
+                        final_prompt = _build_followup_prompt(ctx, st.session_state['messages_tab3'], prompt)
+                    else:
+                        final_prompt = prompt
+                    text, err = ask_gemini(final_prompt)
+                    if err:
+                        message_placeholder.error(err)
+                    else:
+                        message_placeholder.markdown(text)
+                        st.session_state['messages_tab3'].append({"role": "assistant", "content": text})
 
         elif df_apply is not None and df_apply.empty: st.warning("현재 진행 중인 서울 청약 공고가 없습니다.")
         else: st.error("🚨 청약 데이터를 불러오지 못했습니다.")
