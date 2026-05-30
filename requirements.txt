@@ -1,5 +1,5 @@
 streamlit==1.40.0
 pandas
 st-gsheets-connection
-google-generativeai
+google-genai
 PublicDataReader
