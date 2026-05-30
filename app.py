@@ -3,12 +3,14 @@ import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
 from streamlit_gsheets import GSheetsConnection
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions  # [CHANGED] 429(ResourceExhausted) 분기 처리용
+# [CHANGED] 폐기된 google-generativeai → 신형 google-genai SDK로 마이그레이션
+from google import genai
+from google.genai import types
+from google.genai import errors as genai_errors  # [CHANGED] 429(RESOURCE_EXHAUSTED) 분기 처리용
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 import time
-import random  # [CHANGED] 지수 백오프 지터(jitter)용
+import random  # 지수 백오프 지터(jitter)용
 
 # --------------------------------------------------------------------------
 # [1] 설정 및 초기화
@@ -19,14 +21,15 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
     st.error("🚨 secrets.toml 오류: 키가 설정되지 않았습니다.")
     st.stop()
 
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+# [CHANGED] genai.configure() → 신형 SDK의 Client 인스턴스 생성
+client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# [CHANGED] 별칭(gemini-flash-latest)은 구글이 가리키는 실제 모델이 바뀌면 할당량 정책도 흔들린다.
+# 별칭(gemini-flash-latest)은 구글이 가리키는 실제 모델이 바뀌면 할당량/도구 정책도 흔들린다.
 # 명시적 버전을 고정해 동작과 한도를 예측 가능하게 한다. (필요 시 secrets로 오버라이드)
 GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 # [CHANGED] AI 호출 동작을 제어하는 설정 상수 (매직 넘버/스트링 제거)
-SEARCH_TOOL = "google_search_retrieval"
+# 신형 SDK에서는 도구를 types.Tool(google_search=...)로 지정하므로 문자열 상수는 불필요.
 # 후속 질문에 검색 도구를 켤지 결정하는 트리거 키워드. 단순 질문에는 검색을 끄고 토큰을 아낀다.
 SEARCH_TRIGGERS = ("비교", "시세", "호재", "학군", "최신", "뉴스", "경쟁률", "분양가", "주변", "단지")
 # 후속 질문 시 프롬프트에 포함할 최대 대화 턴 수. 이력 윈도잉으로 TPM 폭증을 막는다.
@@ -39,21 +42,14 @@ api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 # R-ONE(한국부동산원) API 키는 별도 신청이 필요할 수 있음.
 reb_api_key = unquote(st.secrets.get("REB_API_KEY", st.secrets["PUBLIC_DATA_KEY"]))
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.1)")
+st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.2)")
 st.caption("실거래가 + R-ONE 지수 시세 + AI 실시간 검색 자문 + 청약 컨설팅")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
-# [CHANGED] [함수 그룹 0] Gemini 호출 통합 헬퍼 (429 재시도 + 조건부 검색 + 이력 윈도잉)
-#   - 세 탭에 흩어져 있던 모델 생성/검색도구/이력병합/예외처리를 단일 진입점으로 통합한다.
+# [CHANGED] [함수 그룹 0] Gemini 호출 통합 헬퍼 (google-genai SDK 기준)
+#   - 429 재시도 + 조건부 검색(google_search) + 이력 윈도잉을 단일 진입점으로 통합한다.
 # --------------------------------------------------------------------------
-def _build_model(use_search: bool):
-    """검색 도구 사용 여부에 따라 모델 인스턴스를 생성한다."""
-    if use_search:
-        return genai.GenerativeModel(GEMINI_MODEL, tools=SEARCH_TOOL)
-    return genai.GenerativeModel(GEMINI_MODEL)
-
-
 def _should_use_search(text: str) -> bool:
     """질문에 외부 검색이 필요한 키워드가 포함되어 있는지 판정한다."""
     return any(keyword in text for keyword in SEARCH_TRIGGERS)
@@ -76,22 +72,34 @@ def _build_followup_prompt(context_prompt: str, messages: list, user_question: s
 
 def ask_gemini(prompt: str, force_search: bool = False):
     """
-    Gemini 호출의 단일 진입점.
-    - force_search=True 이거나 prompt에 검색 트리거가 있으면 검색 도구를 활성화.
-    - 429(ResourceExhausted) 발생 시 지수 백오프로 재시도. 서버 권장 retry_delay 우선.
+    Gemini 호출의 단일 진입점 (google-genai SDK 기준).
+    - force_search=True 이거나 prompt에 검색 트리거가 있으면 신형 google_search 도구 활성화.
+    - 429(RESOURCE_EXHAUSTED) 발생 시 지수 백오프로 재시도.
     - 반환: (response_text, error_message). 성공 시 error_message는 None.
     """
     use_search = force_search or _should_use_search(prompt)
-    model = _build_model(use_search)
+
+    # [CHANGED] 구형 'google_search_retrieval' → 신형 types.Tool(google_search=types.GoogleSearch())
+    config = None
+    if use_search:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
 
     for attempt in range(GEMINI_MAX_RETRIES):
         try:
-            response = model.generate_content(prompt)
+            # [CHANGED] genai.GenerativeModel(...).generate_content() → client.models.generate_content()
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=config,
+            )
             return response.text, None
-        except google_exceptions.ResourceExhausted as e:
-            # 서버가 권장하는 대기 시간이 있으면 우선 사용, 없으면 지수 백오프 + 지터
-            server_wait = getattr(getattr(e, "retry_delay", None), "seconds", 0) or 0
-            wait = server_wait if server_wait > 0 else (2 ** attempt) + random.uniform(0, 1)
+        except genai_errors.APIError as e:  # [CHANGED] 신형 SDK의 통합 예외 타입
+            # 429(할당량 초과)만 재시도, 그 외 API 에러는 즉시 반환
+            if getattr(e, "code", None) != 429:
+                return None, f"AI 호출 오류: {e}"
+            wait = (2 ** attempt) + random.uniform(0, 1)
             if attempt < GEMINI_MAX_RETRIES - 1:
                 st.warning(
                     f"⏳ API 한도 도달. {wait:.0f}초 후 재시도합니다... "
