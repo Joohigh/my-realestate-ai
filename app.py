@@ -19,7 +19,7 @@ if "GOOGLE_API_KEY" not in st.secrets or "PUBLIC_DATA_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 # [수정] 검색 기능의 안정성을 위해 최신 안정화 버전으로 명시합니다.
-GEMINI_MODEL = "gemini-flash-latest"  
+GEMINI_MODEL = "gemini-1.5-flash"  
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 
 # R-ONE(한국부동산원) API 키는 별도 신청이 필요할 수 있음.
