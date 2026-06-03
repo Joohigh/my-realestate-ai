@@ -331,7 +331,7 @@ with st.sidebar:
     st.header("💰 내 재정 및 청약 조건")
 
     with st.expander("💸 자산 및 소득 (클릭)", expanded=True):
-        user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
+        user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=4.0, step=0.1)
         user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=7.5, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
 
