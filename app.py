@@ -6,7 +6,7 @@ from streamlit_gsheets import GSheetsConnection
 # [CHANGED] 폐기된 google-generativeai → 신형 google-genai SDK로 마이그레이션
 from google import genai
 from google.genai import types
-from google.genai import errors as genai_errors  # [CHANGED] 429(RESOURCE_EXHAUSTED) 분기 처리용
+from google.genai import errors as genai_errors  # [CHANGED] APIError(429/503 포함) 분기 처리용
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 import time
@@ -31,10 +31,10 @@ GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
 # [CHANGED] AI 호출 동작을 제어하는 설정 상수 (매직 넘버/스트링 제거)
 # 신형 SDK에서는 도구를 types.Tool(google_search=...)로 지정하므로 문자열 상수는 불필요.
 # 후속 질문에 검색 도구를 켤지 결정하는 트리거 키워드. 단순 질문에는 검색을 끄고 토큰을 아낀다.
-SEARCH_TRIGGERS = ("비교", "시세", "호재", "학군", "최신", "뉴스", "경쟁률", "분양가", "주변", "단지")
+SEARCH_TRIGGERS = ("비교", "시세", "호재", "학군", "최신", "뉴스", "경쟁률", "분양가", "주변", "단지", "호가")
 # 후속 질문 시 프롬프트에 포함할 최대 대화 턴 수. 이력 윈도잉으로 TPM 폭증을 막는다.
 MAX_HISTORY_TURNS = 6
-# 429 재시도 정책
+# 429/503 재시도 정책
 GEMINI_MAX_RETRIES = 4
 
 api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
@@ -42,13 +42,13 @@ api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 # R-ONE(한국부동산원) API 키는 별도 신청이 필요할 수 있음.
 reb_api_key = unquote(st.secrets.get("REB_API_KEY", st.secrets["PUBLIC_DATA_KEY"]))
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.2)")
-st.caption("실거래가 + R-ONE 지수 시세 + AI 실시간 검색 자문 + 청약 컨설팅")
+st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.3)")
+st.caption("실거래가 + R-ONE 지수 시세 + 상승장 보정 + AI 실시간 호가 검증 + 청약 컨설팅")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
 # [CHANGED] [함수 그룹 0] Gemini 호출 통합 헬퍼 (google-genai SDK 기준)
-#   - 429 재시도 + 조건부 검색(google_search) + 이력 윈도잉을 단일 진입점으로 통합한다.
+#   - 429/503 재시도 + 조건부 검색(google_search) + 이력 윈도잉을 단일 진입점으로 통합한다.
 # --------------------------------------------------------------------------
 def _should_use_search(text: str) -> bool:
     """질문에 외부 검색이 필요한 키워드가 포함되어 있는지 판정한다."""
@@ -74,7 +74,8 @@ def ask_gemini(prompt: str, force_search: bool = False):
     """
     Gemini 호출의 단일 진입점 (google-genai SDK 기준).
     - force_search=True 이거나 prompt에 검색 트리거가 있으면 신형 google_search 도구 활성화.
-    - 429(RESOURCE_EXHAUSTED) 발생 시 지수 백오프로 재시도.
+    - 429(RESOURCE_EXHAUSTED) / 503(UNAVAILABLE) 발생 시 지수 백오프로 재시도.
+      두 코드 모두 genai_errors.APIError의 하위(ClientError/ServerError)이므로 단일 except로 처리.
     - 반환: (response_text, error_message). 성공 시 error_message는 None.
     """
     use_search = force_search or _should_use_search(prompt)
@@ -122,7 +123,7 @@ def ask_gemini(prompt: str, force_search: bool = False):
                 return None, (
                     "🚨 Gemini 서버가 일시적으로 과부하 상태입니다(503 UNAVAILABLE).\n\n"
                     "- 서버 측 일시 문제로, 보통 수십 초~수 분 내 자동 해소됩니다.\n"
-                    "- 잠시 후 [AI 추천 분석 시작]을 다시 눌러주세요.\n"
+                    "- 잠시 후 다시 시도해 주세요.\n"
                     "- 반복된다면 GEMINI_MODEL을 다른 버전(예: gemini-2.0-flash)으로 임시 전환해 보세요."
                 )
             return None, (
@@ -132,6 +133,9 @@ def ask_gemini(prompt: str, force_search: bool = False):
                 "- 근본 해결책: Google AI Studio에서 결제를 활성화해 Tier 1으로 전환하면 "
                 "분당·일일 한도가 크게 늘고, 입력 데이터가 학습에 사용되지 않습니다."
             )
+        except Exception as e:  # noqa: BLE001 - 그 외 호출 오류는 사용자에게 그대로 전달
+            return None, f"AI 호출 오류: {e}"
+    return None, "알 수 없는 오류로 응답을 받지 못했습니다."
 
 # --------------------------------------------------------------------------
 # [함수 그룹 A] 국토부 실거래가 API
@@ -413,6 +417,15 @@ with st.sidebar:
         months_to_fetch = st.slider("조회 월 범위", 1, 6, 2)
 
     apply_estimation = st.checkbox("🌟 추정 현재시세 자동 산출", value=True)
+    # [추가/해결책2] 상승장 보정: 실거래·지수의 후행성을 보완하기 위한 안전마진.
+    # 추정시세에 이 비율을 더해 필터링·표시한다. 상승장에서 실제 호가와의 괴리를 줄인다.
+    market_buffer = st.slider(
+        "📈 상승장 안전마진 (%)",
+        0, 15, 5,
+        help="실거래가(최대 1개월 시차)·R-ONE 지수(1~2주 시차)의 후행성 탓에 상승장에서는 "
+             "추정시세가 실제 호가보다 낮게 나옵니다. 이 비율만큼 추정시세를 상향 보정해 "
+             "보수적으로 필터링합니다."
+    )
     rent_recent_only = st.checkbox("📅 전월세 최근 30일 데이터만 사용", value=False)
 
     fetch_clicked = st.button(f"📥 선택된 {sel_count}개 구 데이터 수집", type="primary", disabled=(sel_count == 0), use_container_width=True)
@@ -563,8 +576,16 @@ with st.sidebar:
                         cum_changes.append(chg if chg is not None else 0.0)
                     df_clean['추정현재시세(억)'] = est_prices
                     df_clean['누적변동률(%)'] = cum_changes
+                    # [추가/해결책2] 안전마진 반영 — 후행 데이터의 상승장 과소평가를 보정.
+                    # 보정 전 원본은 별도 컬럼에 보관해 AI 호가 검증 시 비교 근거로 쓴다.
+                    df_clean['지수추정시세(억)'] = df_clean['추정현재시세(억)']
+                    if market_buffer > 0:
+                        df_clean['추정현재시세(억)'] = (
+                            df_clean['추정현재시세(억)'] * (1 + market_buffer / 100)
+                        ).round(2)
             else:
                 df_clean['추정현재시세(억)'] = df_clean['매매가(억)']
+                df_clean['지수추정시세(억)'] = df_clean['매매가(억)']
                 df_clean['누적변동률(%)'] = 0.0
 
             df_clean['전고점(억)'] = 0.0
@@ -573,12 +594,13 @@ with st.sidebar:
 
             cols_to_keep = [
                 '아파트명', '지역', '평형', '층', '건축년도',
-                '매매가(억)', '추정현재시세(억)', '누적변동률(%)', '데이터신선도',
+                '매매가(억)', '추정현재시세(억)', '지수추정시세(억)', '누적변동률(%)', '데이터신선도',
                 '전세가(억)', '월세보증금(억)', '월세액(만원)',
                 '거래일', '전고점(억)', '입지점수'
             ]
             st.session_state['fetched_data'] = df_clean[cols_to_keep]
-            st.success(f"✅ 수집 완료! 총 {len(df_clean)}건")
+            st.session_state['applied_buffer'] = market_buffer
+            st.success(f"✅ 수집 완료! 총 {len(df_clean)}건 (안전마진 {market_buffer}% 적용)")
         else:
             st.error("⚠️ 수집된 데이터가 없습니다.")
 
@@ -600,14 +622,23 @@ except Exception:
 # --- TAB 1: 데이터 저장 ---
 with tab1:
     st.subheader("📡 실시간 실거래 시세 + 추정 현재시세")
+    applied_buffer = st.session_state.get('applied_buffer', 0)
+    if applied_buffer > 0:
+        st.info(
+            f"📈 현재 표시된 '추정현재시세(억)'에는 상승장 안전마진 **{applied_buffer}%**가 반영되어 있습니다. "
+            "이는 실거래·지수의 후행성을 보완한 보수적 추정치이며, 실제 호가와는 차이가 있을 수 있습니다."
+        )
     if 'fetched_data' in st.session_state:
         df_new = st.session_state['fetched_data']
         search_apt = st.text_input("아파트 검색", placeholder="예: 래미안")
         df_display = df_new[df_new['아파트명'].astype(str).str.contains(search_apt)] if search_apt else df_new
-        st.dataframe(df_display.style.format({
+        display_fmt = {
             '매매가(억)': '{:.2f}', '추정현재시세(억)': '{:.2f}', '누적변동률(%)': '{:+.2f}%',
             '전세가(억)': '{:.2f}', '월세보증금(억)': '{:.2f}'
-        }), use_container_width=True)
+        }
+        if '지수추정시세(억)' in df_display.columns:
+            display_fmt['지수추정시세(억)'] = '{:.2f}'
+        st.dataframe(df_display.style.format(display_fmt), use_container_width=True)
 
         if st.button("💾 구글 시트에 저장 (기준정보 반영)"):
             try:
@@ -625,7 +656,12 @@ with tab1:
                 try: df_current = conn.read(ttl=0)
                 except Exception: df_current = pd.DataFrame()
 
-                cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '추정현재시세(억)', '누적변동률(%)', '데이터신선도', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
+                cols = ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '추정현재시세(억)', '지수추정시세(억)', '누적변동률(%)', '데이터신선도', '전세가(억)', '월세보증금(억)', '월세액(만원)', '거래일', '전고점(억)', '입지점수']
+
+                # 원본 df_new에 일부 컬럼이 없을 수 있으므로 방어적으로 채운다.
+                for c in cols:
+                    if c not in df_new.columns:
+                        df_new[c] = 0 if c in ['지수추정시세(억)'] else df_new.get(c, "-")
 
                 if not df_current.empty:
                     for c in cols:
@@ -639,7 +675,7 @@ with tab1:
                         key = f"{str(row['아파트명']).replace(' ', '').strip()}_{row['평형']}"
                         if key in current_dict:
                             current_dict[key].update({
-                                '매매가(억)': row['매매가(억)'], '추정현재시세(억)': row['추정현재시세(억)'], '누적변동률(%)': row['누적변동률(%)'], '데이터신선도': row['데이터신선도'],
+                                '매매가(억)': row['매매가(억)'], '추정현재시세(억)': row['추정현재시세(억)'], '지수추정시세(억)': row.get('지수추정시세(억)', row['추정현재시세(억)']), '누적변동률(%)': row['누적변동률(%)'], '데이터신선도': row['데이터신선도'],
                                 '층': row['층'], '건축년도': row['건축년도'], '전세가(억)': row['전세가(억)'], '월세보증금(억)': row['월세보증금(억)'], '월세액(만원)': row['월세액(만원)'], '거래일': row['거래일']
                             })
                             if row['전고점(억)'] > 0: current_dict[key]['전고점(억)'] = row['전고점(억)']
@@ -660,13 +696,17 @@ with tab2:
     try:
         df_sheet = conn.read(ttl=0)
         if not df_sheet.empty and '매매가(억)' in df_sheet.columns:
-            for c in ['층', '건축년도', '추정현재시세(억)', '누적변동률(%)', '데이터신선도']:
+            for c in ['층', '건축년도', '추정현재시세(억)', '지수추정시세(억)', '누적변동률(%)', '데이터신선도']:
                 if c not in df_sheet.columns: df_sheet[c] = "-" if c in ['층', '건축년도', '데이터신선도'] else 0
 
             df_sheet['추정현재시세(억)'] = pd.to_numeric(df_sheet['추정현재시세(억)'], errors='coerce').fillna(0)
             df_sheet.loc[df_sheet['추정현재시세(억)'] == 0, '추정현재시세(억)'] = df_sheet['매매가(억)']
+            df_sheet['지수추정시세(억)'] = pd.to_numeric(df_sheet['지수추정시세(억)'], errors='coerce').fillna(0)
+            df_sheet.loc[df_sheet['지수추정시세(억)'] == 0, '지수추정시세(억)'] = df_sheet['추정현재시세(억)']
 
             st.header("🏆 AI 추천 랭킹 (추정 현재시세 기준)")
+            st.caption("⚠️ '추정현재시세'는 국토부 실거래가(최대 1개월 시차) + R-ONE 지수 + 상승장 안전마진으로 산출한 보수적 추정치입니다. "
+                       "실제 매수 전 아래 AI 자문의 '실시간 호가 검증'을 반드시 확인하세요.")
             df_rank = df_sheet.copy()
             df_rank['하락률(%)'] = df_rank.apply(lambda x: ((x['전고점(억)'] - x['추정현재시세(억)']) / x['전고점(억)'] * 100) if x.get('전고점(억)', 0) > 0 else 0, axis=1)
             df_rank['갭(억)'] = df_rank['추정현재시세(억)'] - df_rank['전세가(억)']
@@ -732,17 +772,22 @@ with tab2:
                     [매물] {target['아파트명']} ({target['지역']}), {target.get('건축년도','-')}년 건축, {target.get('층','-')}층, {target['평형']}평
                     [가격 정보 — 중요]
                     - 직전 실거래가: {target['매매가(억)']}억 (거래일: {target.get('거래일', '-')})
-                    - 추정 현재시세: {target['추정현재시세(억)']:.2f}억 (R-ONE 지수 누적 {target.get('누적변동률(%)', 0):+.2f}% 적용)
+                    - 추정 현재시세(안전마진 포함): {target['추정현재시세(억)']:.2f}억 (R-ONE 지수 누적 {target.get('누적변동률(%)', 0):+.2f}% 적용)
                     - 최근 평균 전세가: {target['전세가(억)']:.2f}억, 전고점: {target.get('전고점(억)', 0)}억
                     [재정] 현금 {user_cash}억, 연소득 {user_income}천만, 금리 {target_loan_rate}%, 예상 DSR {dsr_rough:.1f}%
 
-                    🔥중요 지시사항🔥
-                    사용자가 이 데이터베이스에 없는 다른 아파트와의 '비교'를 요청하거나, 실시간 호재/시세/학군 등을 물어보면 반드시 너에게 내장된 '구글 실시간 검색(Google Search)' 기능을 활발하게 사용해서 네이버 부동산 시세나 최신 뉴스를 찾아내서 대답해줘.
+                    🔥가장 중요한 지시사항 — 반드시 먼저 수행🔥
+                    위 '추정 현재시세'는 국토부 실거래가(최대 1개월 시차)와 한국부동산원 구 평균지수(1~2주 시차)로 산출한 값이라,
+                    상승장에서는 실제 현재 호가보다 낮을 수 있다. 따라서 분석 전에:
+                    1. '구글 실시간 검색(Google Search)'으로 이 단지의 '현재 네이버 부동산 매물 호가'를 먼저 확인해라.
+                    2. 검색한 실제 호가와 위 추정 현재시세의 괴리를 명확히 제시하고,
+                       괴리가 크면 "데이터상 가격과 실제 호가의 차이"를 사용자에게 솔직하게 경고해라.
+                    3. 실제 호가 기준으로 사용자의 현금({user_cash}억)·소득으로 매수 가능한지 재평가해라.
 
-                    먼저 이 매물의 가격 적정성, 층/연식을 고려한 적합성, 자금 여력을 종합 분석해줘.
+                    위 호가 검증을 마친 뒤, 가격 적정성·층/연식 적합성·자금 여력을 종합 분석해줘.
                     """
                     st.session_state['context_prompt_tab2'] = system_prompt
-                    with st.spinner("AI가 입체적으로 분석 중입니다..."):
+                    with st.spinner("AI가 실시간 호가를 검색하며 입체적으로 분석 중입니다..."):
                         # [CHANGED] 통합 헬퍼 사용. 초기 심층 분석은 검색을 강제 활성화(force_search=True).
                         text, err = ask_gemini(system_prompt, force_search=True)
                         if err:
@@ -790,7 +835,7 @@ with tab2:
             st.divider()
 
             # --- 지역 기반 추천 자문 ---
-            st.header("🎯 지역 기반 AI 단지 추천 (실시간 검색 탑재)")
+            st.header("🎯 지역 기반 AI 단지 추천 (실시간 호가 검증 탑재)")
             rec_col1, rec_col2 = st.columns(2)
             with rec_col1:
                 df_sheet['_시군구'] = df_sheet['지역'].astype(str).str.split(' ').str[:2].str.join(' ')
@@ -862,6 +907,7 @@ with tab2:
                         else:
                             display_cols = [c for c in ['아파트명', '지역', '평형', '층', '건축년도', '매매가(억)', '추정현재시세(억)', '전세가(억)', '갭(억)', '종합점수', '데이터신선도', '거래일'] if c in df_top.columns]
                             st.subheader(f"📊 1차 후보 단지 ({len(df_top)}건)")
+                            st.caption("아래는 데이터 기반 1차 후보입니다. AI가 실시간 호가를 검색해 실제 매수 가능성을 다시 검증합니다.")
                             st.dataframe(df_top[display_cols].style.format({'매매가(억)': '{:.2f}', '추정현재시세(억)': '{:.2f}', '전세가(억)': '{:.2f}', '갭(억)': '{:.2f}', '종합점수': '{:.1f}점'}), use_container_width=True, hide_index=True)
 
                             system_prompt_rec = f"""
@@ -870,14 +916,22 @@ with tab2:
                             [재정] 현금: {user_cash}억, 연소득: {user_income}천만원
                             [후보 리스트] {df_top[display_cols].to_string(index=False)}
 
-                            🔥중요 지시사항🔥
-                            사용자가 위 리스트에 없는 다른 단지와의 '비교'를 요청하거나, 실시간 정보를 물어보면 반드시 너에게 내장된 '구글 실시간 검색(Google Search)' 기능을 적극적으로 활용해서 외부 데이터도 함께 비교해줘.
+                            🔥가장 중요한 지시사항 — 반드시 먼저 수행🔥
+                            위 후보 리스트의 '추정현재시세'는 국토부 실거래가(최대 1개월 시차) + 한국부동산원 구 평균지수(1~2주 시차)로 산출한 값이라,
+                            상승장에서는 실제 현재 호가보다 낮을 수 있다. 따라서:
+                            1. BEST 후보로 꼽으려는 단지들에 대해 '구글 실시간 검색(Google Search)'으로
+                               네이버 부동산 등의 '현재 매물 호가'를 반드시 먼저 확인해라.
+                            2. 검색한 실제 호가와 리스트의 추정현재시세 간 괴리를 표로 명확히 제시하고,
+                               괴리가 큰 단지는 "데이터상 예산 내이나 실제 호가는 예산 초과 가능성"이라고 솔직하게 경고해라.
+                            3. 실제 호가 기준으로도 사용자의 예산({rec_budget_max}억)과 현금({user_cash}억) 안에 들어오는
+                               단지를 우선 추천해라. 데이터상으로만 저렴해 보이는 단지를 추천하지 마라.
 
-                            리스트에 있는 단지 중 BEST 1~2곳을 뽑고 각 단지의 장단점과 자금 조달 시나리오를 구체적으로 짜줘.
+                            위 검증을 마친 뒤, 실제 매수 가능성이 높은 BEST 1~2곳을 뽑고
+                            각 단지의 장단점과 자금 조달 시나리오를 구체적으로 짜줘.
                             """
                             st.session_state['context_recommend'] = system_prompt_rec
                             st.session_state['messages_recommend'] = []
-                            with st.spinner("AI가 다중 목적 종합 분석 중입니다..."):
+                            with st.spinner("AI가 실시간 호가를 검색하며 다중 목적 종합 분석 중입니다..."):
                                 # [CHANGED] 통합 헬퍼 사용 + 초기 분석은 검색 강제 활성화.
                                 text, err = ask_gemini(system_prompt_rec, force_search=True)
                                 if err:
