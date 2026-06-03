@@ -95,28 +95,43 @@ def ask_gemini(prompt: str, force_search: bool = False):
                 config=config,
             )
             return response.text, None
-        except genai_errors.APIError as e:  # [CHANGED] 신형 SDK의 통합 예외 타입
-            # 429(할당량 초과)만 재시도, 그 외 API 에러는 즉시 반환
-            if getattr(e, "code", None) != 429:
+        except genai_errors.APIError as e:  # ServerError(5xx)·ClientError(4xx) 모두 이 타입의 하위
+            code = getattr(e, "code", None)
+            # 429(할당량) + 503(서버 과부하)은 재시도 대상. 그 외는 즉시 반환.
+            if code not in (429, 503):
                 return None, f"AI 호출 오류: {e}"
-            wait = (2 ** attempt) + random.uniform(0, 1)
-            if attempt < GEMINI_MAX_RETRIES - 1:
-                st.warning(
-                    f"⏳ API 한도 도달. {wait:.0f}초 후 재시도합니다... "
-                    f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
-                )
+
+            is_last = attempt == GEMINI_MAX_RETRIES - 1
+            if not is_last:
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                if code == 503:
+                    st.warning(
+                        f"⏳ Gemini 서버 과부하(503). {wait:.0f}초 후 재시도합니다... "
+                        f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
+                    )
+                else:  # 429
+                    st.warning(
+                        f"⏳ API 한도 도달(429). {wait:.0f}초 후 재시도합니다... "
+                        f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
+                    )
                 time.sleep(wait)
-            else:
+                continue
+
+            # 마지막 시도까지 실패한 경우 — 코드별 안내 분기
+            if code == 503:
                 return None, (
-                    "🚨 Gemini 무료 등급 한도를 초과했습니다.\n\n"
-                    "- 분당 한도(RPM)라면 1~2분 후 다시 시도하세요.\n"
-                    "- 일일 한도(RPD)라면 태평양 표준시 자정(한국시간 오후 4~5시경) 이후 초기화됩니다.\n"
-                    "- 근본 해결책: Google AI Studio에서 결제를 활성화해 Tier 1으로 전환하면 "
-                    "분당·일일 한도가 크게 늘고, 입력 데이터가 학습에 사용되지 않습니다."
+                    "🚨 Gemini 서버가 일시적으로 과부하 상태입니다(503 UNAVAILABLE).\n\n"
+                    "- 서버 측 일시 문제로, 보통 수십 초~수 분 내 자동 해소됩니다.\n"
+                    "- 잠시 후 [AI 추천 분석 시작]을 다시 눌러주세요.\n"
+                    "- 반복된다면 GEMINI_MODEL을 다른 버전(예: gemini-2.0-flash)으로 임시 전환해 보세요."
                 )
-        except Exception as e:  # noqa: BLE001 - 그 외 호출 오류는 사용자에게 그대로 전달
-            return None, f"AI 호출 오류: {e}"
-    return None, "알 수 없는 오류로 응답을 받지 못했습니다."
+            return None, (
+                "🚨 Gemini 무료 등급 한도를 초과했습니다.\n\n"
+                "- 분당 한도(RPM)라면 1~2분 후 다시 시도하세요.\n"
+                "- 일일 한도(RPD)라면 태평양 표준시 자정(한국시간 오후 4~5시경) 이후 초기화됩니다.\n"
+                "- 근본 해결책: Google AI Studio에서 결제를 활성화해 Tier 1으로 전환하면 "
+                "분당·일일 한도가 크게 늘고, 입력 데이터가 학습에 사용되지 않습니다."
+            )
 
 # --------------------------------------------------------------------------
 # [함수 그룹 A] 국토부 실거래가 API
