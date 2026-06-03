@@ -26,7 +26,15 @@ client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
 
 # 별칭(gemini-flash-latest)은 구글이 가리키는 실제 모델이 바뀌면 할당량/도구 정책도 흔들린다.
 # 명시적 버전을 고정해 동작과 한도를 예측 가능하게 한다. (필요 시 secrets로 오버라이드)
+# 기본 모델 + 503 과부하 시 순차 폴백할 대체 모델 체인.
+# 모델마다 GPU 클러스터가 분리돼 있어, 한 모델이 과부하여도 다른 모델은 살아있는 경우가 많다.
+# 2.5-flash-lite를 우선 폴백에 둔다(2.0 계열은 2026-06-01 종료 예정이라 제외).
 GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODELS = [
+    GEMINI_MODEL,
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+]
 
 # [CHANGED] AI 호출 동작을 제어하는 설정 상수 (매직 넘버/스트링 제거)
 # 신형 SDK에서는 도구를 types.Tool(google_search=...)로 지정하므로 문자열 상수는 불필요.
@@ -42,8 +50,8 @@ api_key_decoded = unquote(st.secrets["PUBLIC_DATA_KEY"])
 # R-ONE(한국부동산원) API 키는 별도 신청이 필요할 수 있음.
 reb_api_key = unquote(st.secrets.get("REB_API_KEY", st.secrets["PUBLIC_DATA_KEY"]))
 
-st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.3)")
-st.caption("실거래가 + R-ONE 지수 시세 + 상승장 보정 + AI 실시간 호가 검증 + 청약 컨설팅")
+st.title("🏙️ AI 부동산 통합 솔루션 (Ultimate Ver. 2.4)")
+st.caption("실거래가 + R-ONE 지수 시세 + 상승장 보정 + AI 실시간 호가 검증 + 모델 폴백 + 청약 컨설팅")
 st.markdown("---")
 
 # --------------------------------------------------------------------------
@@ -73,9 +81,10 @@ def _build_followup_prompt(context_prompt: str, messages: list, user_question: s
 def ask_gemini(prompt: str, force_search: bool = False):
     """
     Gemini 호출의 단일 진입점 (google-genai SDK 기준).
-    - force_search=True 이거나 prompt에 검색 트리거가 있으면 신형 google_search 도구 활성화.
-    - 429(RESOURCE_EXHAUSTED) / 503(UNAVAILABLE) 발생 시 지수 백오프로 재시도.
-      두 코드 모두 genai_errors.APIError의 하위(ClientError/ServerError)이므로 단일 except로 처리.
+    - force_search=True 이거나 prompt에 검색 트리거가 있으면 google_search 도구 활성화.
+    - 503(UNAVAILABLE): 모델별 GPU 클러스터가 분리돼 있으므로, 백오프 재시도가 모두 실패하면
+      GEMINI_FALLBACK_MODELS의 다음 모델로 자동 전환한다.
+    - 429(RESOURCE_EXHAUSTED): 개인 할당량 문제이므로 모델을 바꿔도 소용없다. 백오프 후 즉시 안내.
     - 반환: (response_text, error_message). 성공 시 error_message는 None.
     """
     use_search = force_search or _should_use_search(prompt)
@@ -87,55 +96,68 @@ def ask_gemini(prompt: str, force_search: bool = False):
             tools=[types.Tool(google_search=types.GoogleSearch())]
         )
 
-    for attempt in range(GEMINI_MAX_RETRIES):
-        try:
-            # [CHANGED] genai.GenerativeModel(...).generate_content() → client.models.generate_content()
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=config,
-            )
-            return response.text, None
-        except genai_errors.APIError as e:  # ServerError(5xx)·ClientError(4xx) 모두 이 타입의 하위
-            code = getattr(e, "code", None)
-            # 429(할당량) + 503(서버 과부하)은 재시도 대상. 그 외는 즉시 반환.
-            if code not in (429, 503):
+    last_error = "알 수 없는 오류로 응답을 받지 못했습니다."
+
+    for model_idx, model_name in enumerate(GEMINI_FALLBACK_MODELS):
+        is_fallback = model_idx > 0
+        if is_fallback:
+            st.info(f"🔄 기본 모델이 계속 과부하 상태라 대체 모델로 전환합니다: `{model_name}`")
+
+        for attempt in range(GEMINI_MAX_RETRIES):
+            try:
+                # [CHANGED] client.models.generate_content() — 폴백 체인의 현재 모델로 호출
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config,
+                )
+                return response.text, None
+            except genai_errors.APIError as e:  # ServerError(5xx)·ClientError(4xx) 모두 이 타입의 하위
+                code = getattr(e, "code", None)
+
+                # 429(할당량)은 모델 전환으로 해결 불가 → 백오프만 하고, 마지막엔 즉시 안내 반환.
+                if code == 429:
+                    is_last = attempt == GEMINI_MAX_RETRIES - 1
+                    if not is_last:
+                        wait = (2 ** attempt) + random.uniform(0, 1)
+                        st.warning(
+                            f"⏳ API 한도 도달(429). {wait:.0f}초 후 재시도합니다... "
+                            f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
+                        )
+                        time.sleep(wait)
+                        continue
+                    return None, (
+                        "🚨 Gemini 무료 등급 한도를 초과했습니다.\n\n"
+                        "- 분당 한도(RPM)라면 1~2분 후 다시 시도하세요.\n"
+                        "- 일일 한도(RPD)라면 태평양 표준시 자정(한국시간 오후 4~5시경) 이후 초기화됩니다.\n"
+                        "- 근본 해결책: Google AI Studio에서 결제를 활성화해 Tier 1으로 전환하면 "
+                        "분당·일일 한도가 크게 늘고, 입력 데이터가 학습에 사용되지 않습니다."
+                    )
+
+                # 503(과부하): 이 모델에서 백오프 재시도. 다 실패하면 바깥 루프로 빠져 다음 모델 시도.
+                if code == 503:
+                    is_last = attempt == GEMINI_MAX_RETRIES - 1
+                    if not is_last:
+                        wait = (2 ** attempt) + random.uniform(0, 1)
+                        st.warning(
+                            f"⏳ `{model_name}` 과부하(503). {wait:.0f}초 후 재시도... "
+                            f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
+                        )
+                        time.sleep(wait)
+                        continue
+                    last_error = (
+                        "🚨 모든 모델이 일시적으로 과부하 상태입니다(503 UNAVAILABLE).\n\n"
+                        "- 서버 측 문제로, 보통 5~15분 내 자동 해소됩니다.\n"
+                        "- 잠시 후 다시 시도해 주세요."
+                    )
+                    break  # 이 모델 단념 → 다음 폴백 모델로
+
+                # 그 외 API 에러(400/404 등)는 재시도·전환 무의미 → 즉시 반환.
+                return None, f"AI 호출 오류: {e}"
+            except Exception as e:  # noqa: BLE001 - 그 외 호출 오류는 사용자에게 그대로 전달
                 return None, f"AI 호출 오류: {e}"
 
-            is_last = attempt == GEMINI_MAX_RETRIES - 1
-            if not is_last:
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                if code == 503:
-                    st.warning(
-                        f"⏳ Gemini 서버 과부하(503). {wait:.0f}초 후 재시도합니다... "
-                        f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
-                    )
-                else:  # 429
-                    st.warning(
-                        f"⏳ API 한도 도달(429). {wait:.0f}초 후 재시도합니다... "
-                        f"({attempt + 1}/{GEMINI_MAX_RETRIES})"
-                    )
-                time.sleep(wait)
-                continue
-
-            # 마지막 시도까지 실패한 경우 — 코드별 안내 분기
-            if code == 503:
-                return None, (
-                    "🚨 Gemini 서버가 일시적으로 과부하 상태입니다(503 UNAVAILABLE).\n\n"
-                    "- 서버 측 일시 문제로, 보통 수십 초~수 분 내 자동 해소됩니다.\n"
-                    "- 잠시 후 다시 시도해 주세요.\n"
-                    "- 반복된다면 GEMINI_MODEL을 다른 버전(예: gemini-2.0-flash)으로 임시 전환해 보세요."
-                )
-            return None, (
-                "🚨 Gemini 무료 등급 한도를 초과했습니다.\n\n"
-                "- 분당 한도(RPM)라면 1~2분 후 다시 시도하세요.\n"
-                "- 일일 한도(RPD)라면 태평양 표준시 자정(한국시간 오후 4~5시경) 이후 초기화됩니다.\n"
-                "- 근본 해결책: Google AI Studio에서 결제를 활성화해 Tier 1으로 전환하면 "
-                "분당·일일 한도가 크게 늘고, 입력 데이터가 학습에 사용되지 않습니다."
-            )
-        except Exception as e:  # noqa: BLE001 - 그 외 호출 오류는 사용자에게 그대로 전달
-            return None, f"AI 호출 오류: {e}"
-    return None, "알 수 없는 오류로 응답을 받지 못했습니다."
+    return None, last_error
 
 # --------------------------------------------------------------------------
 # [함수 그룹 A] 국토부 실거래가 API
@@ -331,7 +353,7 @@ with st.sidebar:
     st.header("💰 내 재정 및 청약 조건")
 
     with st.expander("💸 자산 및 소득 (클릭)", expanded=True):
-        user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=4.0, step=0.1)
+        user_cash = st.number_input("가용 현금 (억 원)", min_value=0.0, value=3.0, step=0.1)
         user_income = st.number_input("연 소득 (천만 원)", min_value=0.0, value=7.5, step=0.5)
         target_loan_rate = st.slider("예상 대출 금리 (%)", 2.0, 8.0, 4.0)
 
@@ -859,7 +881,7 @@ with tab2:
                 for p in rec_purposes: weights[p] = 1.0
 
             rec_col4, rec_col5 = st.columns(2)
-            with rec_col4: rec_pyung_range = st.slider("📐 평형 범위", 10, 80, (20, 40), key="rec_pyung")
+            with rec_col4: rec_pyung_range = st.slider("📐 평형 범위", 10, 80, (20, 30), key="rec_pyung")
             with rec_col5: rec_top_n = st.slider("🏆 추천 단지 수", 3, 15, 10)
 
             if 'messages_recommend' not in st.session_state: st.session_state['messages_recommend'] = []
